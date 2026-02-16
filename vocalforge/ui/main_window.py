@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from vocalforge.audio.alignment import align_tracks, resample_if_needed
+from vocalforge.audio.alignment import align_tracks, pad_or_trim, resample_if_needed
 from vocalforge.audio.engine import AudioEngine
 from vocalforge.audio.mixer import mix_tracks
 from vocalforge.separation.demucs_worker import separate_song
@@ -40,6 +40,8 @@ class _MixWorker(QThread):
         vocal_gain: float,
         instrumental_gain: float,
         target_lufs: float,
+        alignment_mode: str = "background",
+        vocals_stem_path: str | None = None,
     ):
         super().__init__()
         self._minus_data = minus_data
@@ -50,6 +52,8 @@ class _MixWorker(QThread):
         self._vocal_gain = vocal_gain
         self._instrumental_gain = instrumental_gain
         self._target_lufs = target_lufs
+        self._alignment_mode = alignment_mode
+        self._vocals_stem_path = vocals_stem_path
 
     def run(self) -> None:
         try:
@@ -61,9 +65,30 @@ class _MixWorker(QThread):
                 self.progress.emit("Resampling vocal...")
                 vocal = resample_if_needed(vocal, self._vocal_sr, sr)
 
-            # Align
-            self.progress.emit("Aligning...")
-            aligned_vocal, align_info = align_tracks(self._minus_data, vocal, sr)
+            target_len = self._minus_data.shape[0]
+            align_info = {"lag_samples": 0, "lag_ms": 0.0}
+
+            if self._alignment_mode == "none":
+                self.progress.emit("Padding/trimming (no alignment)...")
+                aligned_vocal = pad_or_trim(vocal, target_len)
+            elif self._alignment_mode == "vocal":
+                # Align against Demucs vocals stem
+                if self._vocals_stem_path is None:
+                    raise RuntimeError(
+                        "Vocal matching requires a Demucs vocals stem. "
+                        "Run Separate first."
+                    )
+                self.progress.emit("Loading vocals stem...")
+                import soundfile as sf
+                vocals_stem, stem_sr = sf.read(self._vocals_stem_path, dtype="float32")
+                if stem_sr != sr:
+                    vocals_stem = resample_if_needed(vocals_stem, stem_sr, sr)
+                self.progress.emit("Aligning to vocals stem...")
+                aligned_vocal, align_info = align_tracks(vocals_stem, vocal, sr)
+            else:
+                # Default: background music alignment
+                self.progress.emit("Aligning...")
+                aligned_vocal, align_info = align_tracks(self._minus_data, vocal, sr)
 
             # Mix
             self.progress.emit("Mixing...")
@@ -112,16 +137,22 @@ class _SeparationWorker(QThread):
                 callback=_callback,
             )
 
-            # Build the cached path so MainWindow can pass it along
+            # Build the cached paths so MainWindow can pass them along
             song_dir = os.path.dirname(os.path.abspath(self._song_path))
             song_name = os.path.splitext(os.path.basename(self._song_path))[0]
-            cached_path = os.path.join(song_dir, f"{song_name}_stems", "no_vocals.wav")
+            stems_dir = os.path.join(song_dir, f"{song_name}_stems")
+            cached_path = os.path.join(stems_dir, "no_vocals.wav")
+            vocals_path = os.path.join(stems_dir, "vocals.wav")
 
-            self.finished.emit({
+            result = {
                 "data": data,
                 "sr": sr,
                 "path": cached_path,
-            })
+            }
+            if os.path.isfile(vocals_path):
+                result["vocals_path"] = vocals_path
+
+            self.finished.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -150,6 +181,10 @@ class MainWindow(QMainWindow):
         # Audio engine
         self._engine = AudioEngine()
 
+        # Track state
+        self._active_track_slot: str = "minus"
+        self._vocals_stem_path: str | None = None
+
         # Worker references (prevent GC while running)
         self._mix_worker: _MixWorker | None = None
         self._separation_worker: _SeparationWorker | None = None
@@ -174,6 +209,14 @@ class MainWindow(QMainWindow):
         self._record_panel.record_stop_clicked.connect(self._on_record_stop)
         self._record_panel.latency_offset_changed.connect(self._on_latency_offset_changed)
 
+        # Connect signals — track selector & seek
+        self._record_panel.track_selected.connect(self._on_track_selected)
+        self._record_panel.seek_requested.connect(self._on_seek)
+        for slot in ("song", "minus", "vocal"):
+            wf = self._import_panel.get_waveform(slot)
+            if wf is not None:
+                wf.seek_requested.connect(self._on_seek)
+
         # Connect signals — separation
         self._import_panel.separate_requested.connect(self._on_separate_start)
 
@@ -184,9 +227,14 @@ class MainWindow(QMainWindow):
     # --- Track loading ---
 
     def _on_track_loaded(self, slot_name: str) -> None:
-        if slot_name != "minus":
+        # Always enable record when minus is loaded
+        if slot_name == "minus":
+            self._record_panel.set_record_enabled(True)
+
+        # Only load into engine if the loaded track matches the active selector
+        if slot_name != self._active_track_slot:
             return
-        track = self._import_panel.minus_track
+        track = self._get_track(slot_name)
         if track is None:
             return
         data, sr = track
@@ -194,10 +242,43 @@ class MainWindow(QMainWindow):
         self._sync_output_device()
         self._sync_input_device()
         self._record_panel.set_playback_enabled(True)
-        self._record_panel.set_record_enabled(True)
         self._record_panel.update_transport_state(False, False)
         total_sec = self._engine.total_frames / self._engine.sample_rate
         self._record_panel.update_time_display(0.0, total_sec)
+        self._record_panel.update_seek_slider(0.0)
+
+    def _get_track(self, slot_name: str) -> tuple | None:
+        """Return (data, sr) for a given slot name."""
+        if slot_name == "song":
+            return self._import_panel.song_track
+        elif slot_name == "minus":
+            return self._import_panel.minus_track
+        elif slot_name == "vocal":
+            return self._import_panel.vocal_track
+        return None
+
+    def _on_track_selected(self, slot_name: str) -> None:
+        """Handle track selector combo change."""
+        self._active_track_slot = slot_name
+        track = self._get_track(slot_name)
+        if track is None:
+            return
+        # Stop current playback and load selected track
+        self._engine.stop()
+        self._position_timer.stop()
+        data, sr = track
+        self._engine.load(data, sr)
+        self._sync_output_device()
+        self._record_panel.set_playback_enabled(True)
+        self._record_panel.update_transport_state(False, False)
+        total_sec = self._engine.total_frames / self._engine.sample_rate
+        self._record_panel.update_time_display(0.0, total_sec)
+        self._record_panel.update_seek_slider(0.0)
+        # Clear all waveform cursors
+        for s in ("song", "minus", "vocal"):
+            wf = self._import_panel.get_waveform(s)
+            if wf is not None:
+                wf.clear_cursor()
 
     # --- Mix readiness ---
 
@@ -237,6 +318,18 @@ class MainWindow(QMainWindow):
         self._mix_panel.set_mix_enabled(False)
         self._mix_panel.set_status("Starting...")
 
+        alignment_mode = self._mix_panel.alignment_mode()
+
+        if alignment_mode == "vocal" and self._vocals_stem_path is None:
+            QMessageBox.warning(
+                self,
+                "Missing Vocals Stem",
+                "Vocal matching alignment requires a Demucs vocals stem.\n"
+                "Run Separate on the song first.",
+            )
+            self._mix_panel.set_mix_enabled(True)
+            return
+
         self._mix_worker = _MixWorker(
             minus_data,
             minus_sr,
@@ -246,6 +339,8 @@ class MainWindow(QMainWindow):
             vocal_gain=self._mix_panel.vocal_gain(),
             instrumental_gain=self._mix_panel.instrumental_gain(),
             target_lufs=self._mix_panel.target_lufs(),
+            alignment_mode=alignment_mode,
+            vocals_stem_path=self._vocals_stem_path,
         )
         self._mix_worker.progress.connect(self._mix_panel.set_status)
         self._mix_worker.finished.connect(self._on_mix_finished)
@@ -253,9 +348,9 @@ class MainWindow(QMainWindow):
         self._mix_worker.start()
 
     def _on_mix_finished(self, result: dict) -> None:
-        self._mix_panel.set_alignment_info(
-            result["lag_ms"], result["lag_samples"]
-        )
+        lag_ms = result.get("lag_ms", 0.0)
+        lag_samples = result.get("lag_samples", 0)
+        self._mix_panel.set_alignment_info(lag_ms, lag_samples)
         self._mix_panel.set_status(
             f"Done — saved to {os.path.basename(result['output_path'])}"
         )
@@ -287,6 +382,7 @@ class MainWindow(QMainWindow):
         self._import_panel.set_minus_track(
             result["data"], result["sr"], result["path"]
         )
+        self._vocals_stem_path = result.get("vocals_path")
         self._import_panel.set_separate_enabled(True)
         self._import_panel.set_separate_progress("")
         self._separation_worker = None
@@ -326,6 +422,24 @@ class MainWindow(QMainWindow):
     def _on_latency_offset_changed(self, value: float) -> None:
         self._engine.latency_offset_ms = value
 
+    # --- Seek ---
+
+    def _on_seek(self, normalized: float) -> None:
+        """Handle seek from slider or waveform click."""
+        if self._engine.is_recording:
+            return
+        total = self._engine.total_frames
+        if total == 0:
+            return
+        frame = int(normalized * total)
+        self._engine.seek(frame)
+        sr = self._engine.sample_rate
+        self._record_panel.update_time_display(frame / sr, total / sr)
+        self._record_panel.update_seek_slider(normalized)
+        waveform = self._import_panel.get_waveform(self._active_track_slot)
+        if waveform is not None:
+            waveform.set_cursor_position(normalized)
+
     # --- Playback controls ---
 
     def _on_play(self) -> None:
@@ -350,7 +464,8 @@ class MainWindow(QMainWindow):
         self._record_panel.set_playback_enabled(True)
         total_sec = self._engine.total_frames / self._engine.sample_rate
         self._record_panel.update_time_display(0.0, total_sec)
-        waveform = self._import_panel.get_waveform("minus")
+        self._record_panel.update_seek_slider(0.0)
+        waveform = self._import_panel.get_waveform(self._active_track_slot)
         if waveform is not None:
             waveform.clear_cursor()
 
@@ -396,7 +511,8 @@ class MainWindow(QMainWindow):
         # Reset time display
         total_sec = self._engine.total_frames / self._engine.sample_rate
         self._record_panel.update_time_display(0.0, total_sec)
-        waveform = self._import_panel.get_waveform("minus")
+        self._record_panel.update_seek_slider(0.0)
+        waveform = self._import_panel.get_waveform(self._active_track_slot)
         if waveform is not None:
             waveform.clear_cursor()
 
@@ -409,7 +525,8 @@ class MainWindow(QMainWindow):
         # Reset time display
         total_sec = self._engine.total_frames / self._engine.sample_rate
         self._record_panel.update_time_display(0.0, total_sec)
-        waveform = self._import_panel.get_waveform("minus")
+        self._record_panel.update_seek_slider(0.0)
+        waveform = self._import_panel.get_waveform(self._active_track_slot)
         if waveform is not None:
             waveform.clear_cursor()
 
@@ -432,14 +549,16 @@ class MainWindow(QMainWindow):
 
         pos = self._engine.position
         sr = self._engine.sample_rate
+        normalized = pos / total
 
-        # Update cursor
-        waveform = self._import_panel.get_waveform("minus")
+        # Update cursor on active track's waveform
+        waveform = self._import_panel.get_waveform(self._active_track_slot)
         if waveform is not None:
-            waveform.set_cursor_position(pos / total)
+            waveform.set_cursor_position(normalized)
 
-        # Update time display
+        # Update time display and seek slider
         self._record_panel.update_time_display(pos / sr, total / sr)
+        self._record_panel.update_seek_slider(normalized)
 
         # Detect natural end of playback
         if self._engine.is_recording and self._engine.playback_ended:

@@ -29,6 +29,8 @@ class RecordPanel(QWidget):
     record_finish_clicked = Signal()
     record_stop_clicked = Signal()
     latency_offset_changed = Signal(float)
+    track_selected = Signal(str)  # emits slot name: "song", "minus", "vocal"
+    seek_requested = Signal(float)  # emits normalized position 0.0–1.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -64,6 +66,15 @@ class RecordPanel(QWidget):
         playback_group = QGroupBox("Playback")
         playback_layout = QVBoxLayout(playback_group)
 
+        # Track selector
+        track_row = QHBoxLayout()
+        track_row.addWidget(QLabel("Track:"))
+        self._track_combo = QComboBox()
+        self._track_combo.addItems(["Song", "Minus", "Vocal"])
+        self._track_combo.setCurrentIndex(1)  # default to Minus
+        track_row.addWidget(self._track_combo, stretch=1)
+        playback_layout.addLayout(track_row)
+
         # Transport buttons
         btn_row = QHBoxLayout()
         self._play_btn = QPushButton("Play")
@@ -81,6 +92,12 @@ class RecordPanel(QWidget):
         self._time_label = QLabel("0:00 / 0:00")
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         playback_layout.addWidget(self._time_label)
+
+        # Seek slider
+        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider.setRange(0, 10000)
+        self._seek_slider.setValue(0)
+        playback_layout.addWidget(self._seek_slider)
 
         # Volume slider
         vol_row = QHBoxLayout()
@@ -150,6 +167,8 @@ class RecordPanel(QWidget):
         self._finish_btn.clicked.connect(self.record_finish_clicked)
         self._discard_btn.clicked.connect(self.record_stop_clicked)
         self._latency_spin.valueChanged.connect(self._on_latency_changed)
+        self._track_combo.currentIndexChanged.connect(self._on_track_changed)
+        self._seek_slider.sliderReleased.connect(self._on_seek_released)
 
     def _populate_devices(self):
         default_input = get_default_input_device()
@@ -196,6 +215,14 @@ class RecordPanel(QWidget):
     def _on_latency_changed(self, value: float) -> None:
         self.latency_offset_changed.emit(value)
 
+    def _on_track_changed(self, index: int) -> None:
+        names = ["song", "minus", "vocal"]
+        if 0 <= index < len(names):
+            self.track_selected.emit(names[index])
+
+    def _on_seek_released(self) -> None:
+        self.seek_requested.emit(self._seek_slider.value() / 10000.0)
+
     def set_playback_enabled(self, enabled: bool) -> None:
         """Enable or disable the Play button (called when track loaded/cleared)."""
         self._play_btn.setEnabled(enabled)
@@ -225,12 +252,20 @@ class RecordPanel(QWidget):
         self._stop_btn.setEnabled(not recording)
         self._input_combo.setEnabled(not recording)
         self._output_combo.setEnabled(not recording)
+        self._seek_slider.setEnabled(not recording)
+        self._track_combo.setEnabled(not recording)
 
     def update_time_display(self, current_sec: float, total_sec: float) -> None:
         """Format and display the current playback time."""
         cur_m, cur_s = divmod(int(current_sec), 60)
         tot_m, tot_s = divmod(int(total_sec), 60)
         self._time_label.setText(f"{cur_m}:{cur_s:02d} / {tot_m}:{tot_s:02d}")
+
+    def update_seek_slider(self, normalized: float) -> None:
+        """Sync seek slider with playback position. Blocks signals to prevent feedback."""
+        self._seek_slider.blockSignals(True)
+        self._seek_slider.setValue(int(normalized * 10000))
+        self._seek_slider.blockSignals(False)
 
     @property
     def selected_input_device(self):

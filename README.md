@@ -11,7 +11,8 @@ My wife likes to sing. The workflow I had was: find a karaoke video, rip the aud
 - **Load a song** — import any audio file as the "plus" (original with vocals)
 - **Automatic vocal separation** — extract instrumental (minus) track using [Demucs](https://github.com/facebookresearch/demucs) (Meta's source separation model), or load your own minus track manually
 - **Record vocals** — play the minus track through speakers/headphones while recording microphone input, with simple Start / Stop / Finish controls
-- **Automatic alignment** — cross-correlation-based alignment of the vocal recording to the music track
+- **Track preview** — switch between Song, Minus, and Vocal tracks for playback; seek by clicking waveforms or dragging the seek slider
+- **Automatic alignment** — three modes: background music cross-correlation, vocal stem matching (using Demucs-extracted vocals), or no alignment
 - **LUFS normalization & mixing** — normalize loudness (ITU-R BS.1770-4) and blend vocal + instrumental at configurable ratios
 - **Export demo track** — save the final mix as a WAV/FLAC file ready to share
 
@@ -71,9 +72,10 @@ python -m vocalforge
 
 ## Usage
 
-1. **Import** — Click "Load Song" and select the original track (plus). Optionally click "Separate" to extract the instrumental, or "Load Minus" to use your own backing track.
-2. **Record** — Select your microphone input, click "Start". The minus track plays; sing along. Click "Finish" when done (or "Stop" to discard and retry).
-3. **Mix** — Adjust the vocal/instrumental balance and target LUFS. Click "Export" to save the final mix.
+1. **Import** — Click "Load Song" and select the original track (plus). Optionally click "Separate" to extract the instrumental (and cache the vocals stem for alignment), or "Load Minus" to use your own backing track.
+2. **Preview** — Use the track selector to switch between Song, Minus, and Vocal. Click anywhere on a waveform or drag the seek slider to jump to a position.
+3. **Record** — Select your microphone input, click "Start". The minus track plays; sing along. Click "Finish" when done (or "Stop" to discard and retry).
+4. **Mix** — Choose an alignment mode (Background music, Vocal matching, or None), adjust the vocal/instrumental balance and target LUFS, then click "Mix & Export".
 
 ## License
 

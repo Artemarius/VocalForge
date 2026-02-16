@@ -5,6 +5,21 @@ from scipy.signal import fftconvolve, resample_poly
 from math import gcd
 
 
+def pad_or_trim(vocal_data: np.ndarray, target_length: int) -> np.ndarray:
+    """Pad with silence or trim vocal to match target length."""
+    current_length = vocal_data.shape[0]
+    if current_length > target_length:
+        return vocal_data[:target_length]
+    elif current_length < target_length:
+        deficit = target_length - current_length
+        if vocal_data.ndim == 1:
+            pad = np.zeros(deficit, dtype=vocal_data.dtype)
+        else:
+            pad = np.zeros((deficit, vocal_data.shape[1]), dtype=vocal_data.dtype)
+        return np.concatenate([vocal_data, pad], axis=0)
+    return vocal_data
+
+
 def to_mono(data: np.ndarray) -> np.ndarray:
     """Convert audio to mono by averaging channels. Passthrough if already mono."""
     if data.ndim == 1:

@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
@@ -25,6 +26,15 @@ class MixPanel(QWidget):
 
         group = QGroupBox("Mix && Export")
         group_layout = QVBoxLayout(group)
+
+        # Alignment mode selector
+        align_row = QHBoxLayout()
+        align_row.addWidget(QLabel("Alignment:"))
+        self._align_combo = QComboBox()
+        self._align_combo.addItems(["None", "Background music", "Vocal matching"])
+        self._align_combo.setCurrentIndex(1)  # default to Background music
+        align_row.addWidget(self._align_combo, stretch=1)
+        group_layout.addLayout(align_row)
 
         # Alignment info
         self._alignment_label = QLabel("Offset: not yet computed")
@@ -89,6 +99,11 @@ class MixPanel(QWidget):
 
     def set_status(self, text: str) -> None:
         self._status_label.setText(text)
+
+    def alignment_mode(self) -> str:
+        """Return the selected alignment mode: 'none', 'background', or 'vocal'."""
+        index = self._align_combo.currentIndex()
+        return ["none", "background", "vocal"][index]
 
     def set_mix_enabled(self, enabled: bool) -> None:
         self._mix_btn.setEnabled(enabled)

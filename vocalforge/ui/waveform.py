@@ -1,7 +1,7 @@
 """Waveform display widget — QPainter-based waveform rendering."""
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -15,6 +15,8 @@ _CURSOR_COLOR = QColor("#FF6B6B")
 class WaveformWidget(QWidget):
     """Displays an audio waveform using min/max envelope rendering."""
 
+    seek_requested = Signal(float)  # emits normalized position 0.0–1.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data: np.ndarray | None = None
@@ -23,6 +25,7 @@ class WaveformWidget(QWidget):
         self._envelope: list[tuple[np.ndarray, np.ndarray]] | None = None
         self._cursor_position: float = -1.0  # normalized 0.0–1.0, -1.0 = hidden
         self.setMinimumHeight(60)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_audio(self, data: np.ndarray, sample_rate: int) -> None:
         """Load audio data and trigger a repaint.
@@ -55,6 +58,12 @@ class WaveformWidget(QWidget):
         """Hide the playback cursor."""
         self._cursor_position = -1.0
         self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if self._data is not None and self.width() > 0:
+            normalized = max(0.0, min(1.0, event.position().x() / self.width()))
+            self.seek_requested.emit(normalized)
+        super().mousePressEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

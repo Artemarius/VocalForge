@@ -28,6 +28,21 @@ def get_device_info() -> dict:
     return {"device": "cpu"}
 
 
+def get_vocals_stem_path(song_path: str, output_dir: str | None = None) -> str | None:
+    """Return the path to cached vocals.wav, or None if not available."""
+    song_path = os.path.abspath(song_path)
+    song_dir = os.path.dirname(song_path)
+    song_name = os.path.splitext(os.path.basename(song_path))[0]
+
+    if output_dir is None:
+        output_dir = os.path.join(song_dir, f"{song_name}_stems")
+
+    vocals_path = os.path.join(output_dir, "vocals.wav")
+    if os.path.isfile(vocals_path):
+        return vocals_path
+    return None
+
+
 def separate_song(
     audio_path: str,
     output_dir: str | None = None,
@@ -150,6 +165,13 @@ def _do_separate(
         callback("Caching stems...", 0.9)
     os.makedirs(output_dir, exist_ok=True)
     sf.write(cached_path, audio_data, sr)
+
+    # Also cache the vocals stem for alignment
+    for i, name in enumerate(model.sources):
+        if name == "vocals":
+            vocals_data = sources[i].cpu().numpy().T.astype(np.float32)
+            sf.write(os.path.join(output_dir, "vocals.wav"), vocals_data, sr)
+            break
 
     if callback:
         callback("Separation complete", 1.0)
