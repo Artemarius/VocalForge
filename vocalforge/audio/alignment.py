@@ -126,3 +126,56 @@ def align_tracks(
         aligned = shifted
 
     return aligned, info
+
+
+def chain_align(
+    minus_sep: np.ndarray,
+    vocal_sep: np.ndarray,
+    vocal_rec: np.ndarray,
+    sample_rate: int,
+    minus_import: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Chain alignment through separated stems as a common reference.
+
+    Aligns a vocal recording to the vocal-sep stem, and optionally aligns
+    an imported minus track to the minus-sep stem.  This allows indirect
+    alignment when the imported minus differs from the original song.
+
+    Args:
+        minus_sep: Separated instrumental (no_vocals) stem.
+        vocal_sep: Separated vocal stem.
+        vocal_rec: User's vocal recording.
+        sample_rate: Sample rate shared by all tracks.
+        minus_import: Optional imported karaoke/minus track to align
+            against minus_sep.
+
+    Returns:
+        (aligned_minus, aligned_vocal, info) where:
+        - aligned_minus is the aligned minus_import (or minus_sep if no import).
+        - aligned_vocal is the vocal recording aligned to the vocal stem.
+        - info dict with vocal_lag_samples, vocal_lag_ms, minus_lag_samples,
+          minus_lag_ms.
+    """
+    # Align vocal recording to the separated vocal stem
+    aligned_vocal, vocal_info = align_tracks(vocal_sep, vocal_rec, sample_rate)
+
+    info = {
+        "vocal_lag_samples": vocal_info["lag_samples"],
+        "vocal_lag_ms": vocal_info["lag_ms"],
+        "minus_lag_samples": 0,
+        "minus_lag_ms": 0.0,
+    }
+
+    if minus_import is not None:
+        # Align imported minus to the separated instrumental stem
+        aligned_minus, minus_info = align_tracks(minus_sep, minus_import, sample_rate)
+        info["minus_lag_samples"] = minus_info["lag_samples"]
+        info["minus_lag_ms"] = minus_info["lag_ms"]
+    else:
+        aligned_minus = minus_sep
+
+    # For the mix info dict, expose the vocal lag as the primary lag
+    info["lag_samples"] = info["vocal_lag_samples"]
+    info["lag_ms"] = info["vocal_lag_ms"]
+
+    return aligned_minus, aligned_vocal, info

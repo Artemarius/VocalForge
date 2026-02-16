@@ -38,10 +38,12 @@ def test_cache_directory_creation(tmp_path):
 
     stems_dir = str(tmp_path / "song_stems")
     cached_path = os.path.join(stems_dir, "no_vocals.wav")
+    vocals_path = os.path.join(stems_dir, "vocals.wav")
 
     # Pre-create the cache so we don't need the Demucs model
     os.makedirs(stems_dir, exist_ok=True)
     _make_stereo_wav(cached_path)
+    _make_stereo_wav(vocals_path)
 
     data, sr = separate_song(song_path)
     assert os.path.isdir(stems_dir)
@@ -52,16 +54,18 @@ def test_cache_hit_returns_cached(tmp_path):
     song_path = str(tmp_path / "mysong.wav")
     _make_stereo_wav(song_path, duration_s=0.5)
 
-    # Pre-populate cache
+    # Pre-populate cache (both stems required for cache hit)
     stems_dir = str(tmp_path / "mysong_stems")
     os.makedirs(stems_dir)
     cached_path = os.path.join(stems_dir, "no_vocals.wav")
+    vocals_path = os.path.join(stems_dir, "vocals.wav")
 
     # Write a distinctive cached file (880 Hz instead of 440 Hz)
     t = np.arange(int(SR * 0.5)) / SR
     mono = (0.3 * np.sin(2 * np.pi * 880 * t)).astype(np.float32)
     cached_data = np.column_stack([mono, mono])
     sf.write(cached_path, cached_data, SR)
+    _make_stereo_wav(vocals_path, duration_s=0.5)
 
     # Track callback messages
     messages = []
@@ -86,7 +90,9 @@ def test_cache_hit_with_custom_output_dir(tmp_path):
     custom_dir = str(tmp_path / "custom_stems")
     os.makedirs(custom_dir)
     cached_path = os.path.join(custom_dir, "no_vocals.wav")
+    vocals_path = os.path.join(custom_dir, "vocals.wav")
     _make_stereo_wav(cached_path, duration_s=0.5)
+    _make_stereo_wav(vocals_path, duration_s=0.5)
 
     data, sr = separate_song(song_path, output_dir=custom_dir)
     assert sr == SR

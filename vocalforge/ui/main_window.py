@@ -17,7 +17,7 @@ from vocalforge.audio.alignment import align_tracks, pad_or_trim, resample_if_ne
 from vocalforge.audio.engine import AudioEngine
 from vocalforge.audio.mixer import mix_tracks
 from vocalforge.separation.demucs_worker import separate_song
-from vocalforge.ui.import_panel import ImportPanel
+from vocalforge.ui.import_panel import ImportPanel, _SLOT_NAMES
 from vocalforge.ui.mix_panel import MixPanel
 from vocalforge.ui.record_panel import RecordPanel
 from vocalforge.utils.audio_io import save_audio
@@ -44,6 +44,10 @@ class _MixWorker(QThread):
         vocals_stem_path: str | None = None,
         noise_reduction_enabled: bool = True,
         noise_reduction_strength: float = 0.75,
+        minus_sep_data: np.ndarray | None = None,
+        minus_sep_sr: int | None = None,
+        vocal_sep_data: np.ndarray | None = None,
+        vocal_sep_sr: int | None = None,
     ):
         super().__init__()
         self._minus_data = minus_data
@@ -58,6 +62,10 @@ class _MixWorker(QThread):
         self._vocals_stem_path = vocals_stem_path
         self._nr_enabled = noise_reduction_enabled
         self._nr_strength = noise_reduction_strength
+        self._minus_sep_data = minus_sep_data
+        self._minus_sep_sr = minus_sep_sr
+        self._vocal_sep_data = vocal_sep_data
+        self._vocal_sep_sr = vocal_sep_sr
 
     def run(self) -> None:
         try:
@@ -69,41 +77,80 @@ class _MixWorker(QThread):
                 self.progress.emit("Resampling vocal...")
                 vocal = resample_if_needed(vocal, self._vocal_sr, sr)
 
+            # Resample separated stems to match mix sample rate if needed
+            minus_sep = self._minus_sep_data
+            if minus_sep is not None and self._minus_sep_sr != sr:
+                minus_sep = resample_if_needed(minus_sep, self._minus_sep_sr, sr)
+
+            vocal_sep = self._vocal_sep_data
+            if vocal_sep is not None and self._vocal_sep_sr != sr:
+                vocal_sep = resample_if_needed(vocal_sep, self._vocal_sep_sr, sr)
+
             target_len = self._minus_data.shape[0]
             align_info = {"lag_samples": 0, "lag_ms": 0.0}
+            minus_for_mix = self._minus_data
 
             if self._alignment_mode == "none":
                 self.progress.emit("Padding/trimming (no alignment)...")
                 aligned_vocal = pad_or_trim(vocal, target_len)
             elif self._alignment_mode == "vocal":
-                # Align against Demucs vocals stem
-                if self._vocals_stem_path is None:
-                    raise RuntimeError(
-                        "Vocal matching requires a Demucs vocals stem. "
-                        "Run Separate first."
+                # Chain alignment through stems when available
+                if minus_sep is not None and vocal_sep is not None:
+                    self.progress.emit("Chain-aligning through stems...")
+                    from vocalforge.audio.alignment import chain_align
+
+                    # Determine if the mix minus differs from minus_sep
+                    # (i.e. user loaded an imported minus track)
+                    is_import = self._minus_data is not minus_sep
+                    minus_import = self._minus_data if is_import else None
+
+                    minus_for_mix, aligned_vocal, align_info = chain_align(
+                        minus_sep, vocal_sep, vocal, sr,
+                        minus_import=minus_import,
                     )
-                self.progress.emit("Loading vocals stem...")
-                import soundfile as sf
-                vocals_stem, stem_sr = sf.read(self._vocals_stem_path, dtype="float32")
-                if stem_sr != sr:
-                    vocals_stem = resample_if_needed(vocals_stem, stem_sr, sr)
-                self.progress.emit("Aligning to vocals stem...")
-                aligned_vocal, align_info = align_tracks(vocals_stem, vocal, sr)
+                elif self._vocals_stem_path is not None:
+                    # Fallback: load vocal stem from file
+                    self.progress.emit("Loading vocals stem...")
+                    import soundfile as sf
+                    vocals_stem, stem_sr = sf.read(
+                        self._vocals_stem_path, dtype="float32"
+                    )
+                    if stem_sr != sr:
+                        vocals_stem = resample_if_needed(vocals_stem, stem_sr, sr)
+                    self.progress.emit("Aligning to vocals stem...")
+                    aligned_vocal, align_info = align_tracks(
+                        vocals_stem, vocal, sr
+                    )
+                else:
+                    raise RuntimeError(
+                        "Vocal matching requires separated stems or a Demucs "
+                        "vocals stem. Run Separate first."
+                    )
             else:
                 # Default: background music alignment
                 self.progress.emit("Aligning...")
-                aligned_vocal, align_info = align_tracks(self._minus_data, vocal, sr)
+                aligned_vocal, align_info = align_tracks(
+                    self._minus_data, vocal, sr
+                )
 
             # Noise reduction
             if self._nr_enabled and self._nr_strength > 0.0:
                 self.progress.emit("Reducing noise...")
                 from vocalforge.audio.noise_reduction import reduce_noise
-                aligned_vocal = reduce_noise(aligned_vocal, sr, strength=self._nr_strength)
+
+                guide = vocal_sep if vocal_sep is not None else None
+                if guide is not None:
+                    self.progress.emit("Reducing noise (stem-guided)...")
+                aligned_vocal = reduce_noise(
+                    aligned_vocal, sr,
+                    strength=self._nr_strength,
+                    guide_stem=guide,
+                )
 
             # Mix
             self.progress.emit("Mixing...")
             mix_data, mix_info = mix_tracks(
-                self._minus_data,
+                minus_for_mix,
                 aligned_vocal,
                 sr,
                 vocal_gain=self._vocal_gain,
@@ -159,8 +206,14 @@ class _SeparationWorker(QThread):
                 "sr": sr,
                 "path": cached_path,
             }
+
+            # Also load and return the vocals stem data
             if os.path.isfile(vocals_path):
+                import soundfile as sf
+                vocals_data, vocals_sr = sf.read(vocals_path, dtype="float32")
                 result["vocals_path"] = vocals_path
+                result["vocals_data"] = vocals_data
+                result["vocals_sr"] = vocals_sr
 
             self.finished.emit(result)
         except Exception as exc:
@@ -192,7 +245,7 @@ class MainWindow(QMainWindow):
         self._engine = AudioEngine()
 
         # Track state
-        self._active_track_slot: str = "minus"
+        self._active_track_slot: str = "minus_sep"
         self._vocals_stem_path: str | None = None
 
         # Worker references (prevent GC while running)
@@ -222,7 +275,7 @@ class MainWindow(QMainWindow):
         # Connect signals — track selector & seek
         self._record_panel.track_selected.connect(self._on_track_selected)
         self._record_panel.seek_requested.connect(self._on_seek)
-        for slot in ("song", "minus", "vocal"):
+        for slot in _SLOT_NAMES:
             wf = self._import_panel.get_waveform(slot)
             if wf is not None:
                 wf.seek_requested.connect(self._on_seek)
@@ -237,8 +290,8 @@ class MainWindow(QMainWindow):
     # --- Track loading ---
 
     def _on_track_loaded(self, slot_name: str) -> None:
-        # Always enable record when minus is loaded
-        if slot_name == "minus":
+        # Enable record when any minus track is loaded
+        if slot_name in ("minus_sep", "minus_import"):
             self._record_panel.set_record_enabled(True)
 
         # Only load into engine if the loaded track matches the active selector
@@ -261,8 +314,12 @@ class MainWindow(QMainWindow):
         """Return (data, sr) for a given slot name."""
         if slot_name == "song":
             return self._import_panel.song_track
-        elif slot_name == "minus":
-            return self._import_panel.minus_track
+        elif slot_name == "minus_sep":
+            return self._import_panel.minus_sep_track
+        elif slot_name == "vocal_sep":
+            return self._import_panel.vocal_sep_track
+        elif slot_name == "minus_import":
+            return self._import_panel.minus_import_track
         elif slot_name == "vocal":
             return self._import_panel.vocal_track
         return None
@@ -285,7 +342,7 @@ class MainWindow(QMainWindow):
         self._record_panel.update_time_display(0.0, total_sec)
         self._record_panel.update_seek_slider(0.0)
         # Clear all waveform cursors
-        for s in ("song", "minus", "vocal"):
+        for s in _SLOT_NAMES:
             wf = self._import_panel.get_waveform(s)
             if wf is not None:
                 wf.clear_cursor()
@@ -293,7 +350,7 @@ class MainWindow(QMainWindow):
     # --- Mix readiness ---
 
     def _update_mix_ready(self, _slot_name: str = "") -> None:
-        """Enable mix button when both minus and vocal tracks are loaded."""
+        """Enable mix button when at least one minus and vocal are loaded."""
         has_minus = self._import_panel.minus_track is not None
         has_vocal = self._import_panel.vocal_track is not None
         self._mix_panel.set_mix_enabled(has_minus and has_vocal)
@@ -301,7 +358,7 @@ class MainWindow(QMainWindow):
     # --- Mix & Export ---
 
     def _on_mix_export(self) -> None:
-        minus = self._import_panel.minus_track
+        minus = self._import_panel.minus_track  # prefers import, falls back to sep
         vocal = self._import_panel.vocal_track
         if minus is None or vocal is None:
             return
@@ -311,7 +368,10 @@ class MainWindow(QMainWindow):
 
         # Choose output path
         default_dir = ""
-        minus_path = self._import_panel.get_track_path("minus")
+        minus_path = (
+            self._import_panel.get_track_path("minus_import")
+            or self._import_panel.get_track_path("minus_sep")
+        )
         if minus_path:
             default_dir = os.path.dirname(minus_path)
 
@@ -330,15 +390,31 @@ class MainWindow(QMainWindow):
 
         alignment_mode = self._mix_panel.alignment_mode()
 
-        if alignment_mode == "vocal" and self._vocals_stem_path is None:
-            QMessageBox.warning(
-                self,
-                "Missing Vocals Stem",
-                "Vocal matching alignment requires a Demucs vocals stem.\n"
-                "Run Separate on the song first.",
+        # Check vocal alignment prerequisites
+        if alignment_mode == "vocal":
+            has_stems = (
+                self._import_panel.minus_sep_track is not None
+                and self._import_panel.vocal_sep_track is not None
             )
-            self._mix_panel.set_mix_enabled(True)
-            return
+            if not has_stems and self._vocals_stem_path is None:
+                QMessageBox.warning(
+                    self,
+                    "Missing Vocals Stem",
+                    "Vocal matching alignment requires separated stems.\n"
+                    "Run Separate on the song first.",
+                )
+                self._mix_panel.set_mix_enabled(True)
+                return
+
+        # Gather separated stem data for chain alignment and NR
+        minus_sep_data = minus_sep_sr = None
+        vocal_sep_data = vocal_sep_sr = None
+        sep = self._import_panel.minus_sep_track
+        if sep is not None:
+            minus_sep_data, minus_sep_sr = sep
+        sep = self._import_panel.vocal_sep_track
+        if sep is not None:
+            vocal_sep_data, vocal_sep_sr = sep
 
         self._mix_worker = _MixWorker(
             minus_data,
@@ -353,6 +429,10 @@ class MainWindow(QMainWindow):
             vocals_stem_path=self._vocals_stem_path,
             noise_reduction_enabled=self._mix_panel.noise_reduction_enabled(),
             noise_reduction_strength=self._mix_panel.noise_reduction_strength(),
+            minus_sep_data=minus_sep_data,
+            minus_sep_sr=minus_sep_sr,
+            vocal_sep_data=vocal_sep_data,
+            vocal_sep_sr=vocal_sep_sr,
         )
         self._mix_worker.progress.connect(self._mix_panel.set_status)
         self._mix_worker.finished.connect(self._on_mix_finished)
@@ -391,9 +471,16 @@ class MainWindow(QMainWindow):
         self._import_panel.set_separate_progress(msg)
 
     def _on_separate_finished(self, result: dict) -> None:
-        self._import_panel.set_minus_track(
+        # Populate minus-sep slot
+        self._import_panel.set_minus_sep_track(
             result["data"], result["sr"], result["path"]
         )
+        # Populate vocal-sep slot if available
+        if "vocals_data" in result:
+            self._import_panel.set_vocal_sep_track(
+                result["vocals_data"], result["vocals_sr"],
+                result.get("vocals_path"),
+            )
         self._vocals_stem_path = result.get("vocals_path")
         self._import_panel.set_separate_enabled(True)
         self._import_panel.set_separate_progress("")
@@ -544,7 +631,10 @@ class MainWindow(QMainWindow):
 
     def _generate_recording_path(self) -> str | None:
         """Generate a path for the recording WAV file next to the minus track."""
-        minus_path = self._import_panel.get_track_path("minus")
+        minus_path = (
+            self._import_panel.get_track_path("minus_import")
+            or self._import_panel.get_track_path("minus_sep")
+        )
         if minus_path is None:
             return None
         directory = os.path.dirname(minus_path)

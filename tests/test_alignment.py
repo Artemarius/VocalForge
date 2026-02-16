@@ -5,6 +5,7 @@ import pytest
 
 from vocalforge.audio.alignment import (
     align_tracks,
+    chain_align,
     compute_lag,
     resample_if_needed,
     to_mono,
@@ -129,3 +130,60 @@ def test_align_tracks_info_populated():
     assert "lag_samples" in info
     assert "lag_ms" in info
     assert "correlation_peak" in info
+
+
+# --- chain_align ---
+
+def test_chain_align_known_offsets():
+    """Chain alignment recovers both vocal and minus offsets."""
+    minus_sep = _make_sine(SR * 2, freq=330)
+    vocal_sep = _make_sine(SR * 2, freq=440)
+
+    vocal_offset = 200
+    minus_offset = 100
+
+    vocal_rec = np.concatenate([
+        np.zeros(vocal_offset, dtype=np.float32), vocal_sep
+    ])
+    minus_import = np.concatenate([
+        np.zeros(minus_offset, dtype=np.float32), minus_sep
+    ])
+
+    aligned_minus, aligned_vocal, info = chain_align(
+        minus_sep, vocal_sep, vocal_rec, SR, minus_import=minus_import
+    )
+
+    assert abs(info["vocal_lag_samples"] - vocal_offset) <= 1
+    assert abs(info["minus_lag_samples"] - minus_offset) <= 1
+    assert aligned_vocal.shape[0] == vocal_sep.shape[0]
+    assert aligned_minus.shape[0] == minus_sep.shape[0]
+
+
+def test_chain_align_no_import():
+    """Without minus_import, returns minus_sep unchanged."""
+    minus_sep = _make_sine(SR, freq=330)
+    vocal_sep = _make_sine(SR, freq=440)
+    vocal_rec = vocal_sep.copy()
+
+    aligned_minus, aligned_vocal, info = chain_align(
+        minus_sep, vocal_sep, vocal_rec, SR
+    )
+
+    np.testing.assert_array_equal(aligned_minus, minus_sep)
+    assert info["minus_lag_samples"] == 0
+    assert info["minus_lag_ms"] == 0.0
+
+
+def test_chain_align_zero_offsets():
+    """Identical signals should yield zero lag for both."""
+    minus_sep = _make_sine(SR, freq=330)
+    vocal_sep = _make_sine(SR, freq=440)
+    vocal_rec = vocal_sep.copy()
+    minus_import = minus_sep.copy()
+
+    _, _, info = chain_align(
+        minus_sep, vocal_sep, vocal_rec, SR, minus_import=minus_import
+    )
+
+    assert abs(info["vocal_lag_samples"]) <= 1
+    assert abs(info["minus_lag_samples"]) <= 1

@@ -45,11 +45,83 @@ def estimate_noise_profile(
         return data[:n_samples]
 
 
+def estimate_noise_from_stem(
+    vocal_rec: np.ndarray,
+    vocal_sep: np.ndarray,
+    sample_rate: int,
+    threshold_db: float = -40.0,
+    min_duration_s: float = 0.5,
+) -> np.ndarray | None:
+    """Extract a noise profile from vocal_rec using vocal_sep as a guide.
+
+    Finds regions where the separated vocal stem is silent (singer not
+    singing) and extracts the corresponding audio from the raw vocal
+    recording — which should contain only room noise at those points.
+
+    Args:
+        vocal_rec: Raw vocal recording, shape (samples,) or (samples, channels).
+        vocal_sep: Separated vocal stem (same length or longer), any layout.
+        sample_rate: Sample rate in Hz.
+        threshold_db: RMS threshold in dB below which a frame is "silent".
+        min_duration_s: Minimum total noise duration required.
+
+    Returns:
+        A noise-only slice from vocal_rec, or None if insufficient silence.
+    """
+    # Work in mono for energy analysis
+    sep_mono = vocal_sep.mean(axis=1) if vocal_sep.ndim > 1 else vocal_sep
+
+    frame_samples = int(0.05 * sample_rate)  # 50 ms frames
+    if frame_samples == 0:
+        return None
+
+    n_frames = len(sep_mono) // frame_samples
+    if n_frames == 0:
+        return None
+
+    # Convert threshold from dB to linear RMS
+    threshold_linear = 10.0 ** (threshold_db / 20.0)
+
+    # Find silent frames in the separated vocal stem
+    silent_indices = []
+    for i in range(n_frames):
+        start = i * frame_samples
+        end = start + frame_samples
+        frame = sep_mono[start:end]
+        rms = np.sqrt(np.mean(frame.astype(np.float64) ** 2))
+        if rms < threshold_linear:
+            silent_indices.append(i)
+
+    if not silent_indices:
+        return None
+
+    # Extract corresponding regions from vocal_rec
+    min_samples = int(min_duration_s * sample_rate)
+    rec_len = vocal_rec.shape[0]
+    segments = []
+    collected = 0
+    for i in silent_indices:
+        start = i * frame_samples
+        end = start + frame_samples
+        if end > rec_len:
+            break
+        segments.append(vocal_rec[start:end])
+        collected += frame_samples
+        if collected >= min_samples:
+            break  # enough noise collected
+
+    if collected < min_samples:
+        return None
+
+    return np.concatenate(segments, axis=0)
+
+
 def reduce_noise(
     data: np.ndarray,
     sample_rate: int,
     noise_clip: np.ndarray | None = None,
     strength: float = 1.0,
+    guide_stem: np.ndarray | None = None,
 ) -> np.ndarray:
     """Apply spectral-gating noise reduction to audio.
 
@@ -60,6 +132,8 @@ def reduce_noise(
             If None, auto-estimated from the start of data.
         strength: Noise reduction intensity from 0.0 (none) to 1.0 (maximum).
             Maps to the ``prop_decrease`` parameter of noisereduce.
+        guide_stem: Optional separated vocal stem used to find silent regions
+            for noise profiling.  Only used when noise_clip is None.
 
     Returns:
         Noise-reduced audio, same shape and dtype (float32) as input.
@@ -72,6 +146,9 @@ def reduce_noise(
         return data.copy()
 
     import noisereduce as nr
+
+    if noise_clip is None and guide_stem is not None:
+        noise_clip = estimate_noise_from_stem(data, guide_stem, sample_rate)
 
     if noise_clip is None:
         noise_clip = estimate_noise_profile(data, sample_rate)

@@ -70,8 +70,10 @@ class RecordPanel(QWidget):
         track_row = QHBoxLayout()
         track_row.addWidget(QLabel("Track:"))
         self._track_combo = QComboBox()
-        self._track_combo.addItems(["Song", "Minus", "Vocal"])
-        self._track_combo.setCurrentIndex(1)  # default to Minus
+        self._track_combo.addItems(
+            ["Song", "Minus (sep)", "Vocal (sep)", "Minus (import)", "Vocal"]
+        )
+        self._track_combo.setCurrentIndex(1)  # default to Minus (sep)
         track_row.addWidget(self._track_combo, stretch=1)
         playback_layout.addLayout(track_row)
 
@@ -216,7 +218,7 @@ class RecordPanel(QWidget):
         self.latency_offset_changed.emit(value)
 
     def _on_track_changed(self, index: int) -> None:
-        names = ["song", "minus", "vocal"]
+        names = ["song", "minus_sep", "vocal_sep", "minus_import", "vocal"]
         if 0 <= index < len(names):
             self.track_selected.emit(names[index])
 

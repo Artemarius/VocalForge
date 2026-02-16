@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from vocalforge.audio.noise_reduction import estimate_noise_profile, reduce_noise
+from vocalforge.audio.noise_reduction import (
+    estimate_noise_from_stem,
+    estimate_noise_profile,
+    reduce_noise,
+)
 
 SR = 44100
 
@@ -127,3 +131,53 @@ def test_output_dtype_float32():
     tone = _make_noisy_tone(duration_s=1.0, noise_level=0.1)
     result = reduce_noise(tone, SR, strength=0.75)
     assert result.dtype == np.float32
+
+
+# --- estimate_noise_from_stem ---
+
+def test_estimate_noise_from_stem_extracts_silent_regions():
+    """Noise profile should come from regions where the vocal stem is silent."""
+    rng = np.random.default_rng(42)
+    # vocal_sep: first half silence, second half loud tone
+    silence = np.zeros(SR, dtype=np.float32)
+    tone = _make_tone(duration_s=1.0, freq=440)
+    vocal_sep = np.concatenate([silence, tone])
+
+    # vocal_rec: noise everywhere + tone in second half
+    noise = (0.05 * rng.standard_normal(SR * 2)).astype(np.float32)
+    vocal_rec = noise.copy()
+    vocal_rec[SR:] += tone
+
+    profile = estimate_noise_from_stem(vocal_rec, vocal_sep, SR)
+    assert profile is not None
+    # Profile should come from the first half (where sep is silent)
+    assert len(profile) >= int(0.5 * SR)
+
+
+def test_estimate_noise_from_stem_insufficient_silence():
+    """Returns None when vocal stem is loud everywhere."""
+    tone = _make_tone(duration_s=2.0, freq=440, amplitude=0.5)
+    vocal_rec = _make_noisy_tone(duration_s=2.0, noise_level=0.1)
+    result = estimate_noise_from_stem(vocal_rec, tone, SR)
+    assert result is None
+
+
+def test_reduce_noise_with_guide_stem():
+    """Stem-guided noise reduction should reduce noise in silent regions."""
+    rng = np.random.default_rng(42)
+    # vocal_sep: silence then tone
+    silence = np.zeros(SR, dtype=np.float32)
+    tone = _make_tone(duration_s=1.0, freq=440)
+    vocal_sep = np.concatenate([silence, tone])
+
+    # vocal_rec: noise + tone in second half
+    noise_full = (0.1 * rng.standard_normal(SR * 2)).astype(np.float32)
+    vocal_rec = noise_full.copy()
+    vocal_rec[SR:] += tone
+
+    reduced = reduce_noise(vocal_rec, SR, strength=1.0, guide_stem=vocal_sep)
+
+    # Noise-only region (first half) should have lower RMS after reduction
+    original_rms = np.sqrt(np.mean(vocal_rec[:SR].astype(np.float64) ** 2))
+    reduced_rms = np.sqrt(np.mean(reduced[:SR].astype(np.float64) ** 2))
+    assert reduced_rms < original_rms
