@@ -120,6 +120,10 @@ class ImportPanel(QWidget):
 
         self.track_loaded.emit(slot_name)
 
+    def get_waveform(self, slot_name: str) -> WaveformWidget | None:
+        """Return the WaveformWidget for a given slot, or None."""
+        return self._waveforms.get(slot_name)
+
     @property
     def song_track(self) -> tuple | None:
         return self._tracks["song"]

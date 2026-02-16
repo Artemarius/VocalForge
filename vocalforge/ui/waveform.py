@@ -9,6 +9,7 @@ _BG_COLOR = QColor("#2D2D2D")
 _CENTER_COLOR = QColor("#555555")
 _WAVE_COLOR = QColor("#3DD5F3")
 _SEPARATOR_COLOR = QColor("#555555")
+_CURSOR_COLOR = QColor("#FF6B6B")
 
 
 class WaveformWidget(QWidget):
@@ -20,6 +21,7 @@ class WaveformWidget(QWidget):
         self._sample_rate: int = 0
         self._channels: int = 0
         self._envelope: list[tuple[np.ndarray, np.ndarray]] | None = None
+        self._cursor_position: float = -1.0  # normalized 0.0–1.0, -1.0 = hidden
         self.setMinimumHeight(60)
 
     def set_audio(self, data: np.ndarray, sample_rate: int) -> None:
@@ -41,6 +43,17 @@ class WaveformWidget(QWidget):
         self._sample_rate = 0
         self._channels = 0
         self._envelope = None
+        self._cursor_position = -1.0
+        self.update()
+
+    def set_cursor_position(self, normalized: float) -> None:
+        """Set the playback cursor position (0.0–1.0). Triggers repaint."""
+        self._cursor_position = normalized
+        self.update()
+
+    def clear_cursor(self) -> None:
+        """Hide the playback cursor."""
+        self._cursor_position = -1.0
         self.update()
 
     def resizeEvent(self, event) -> None:
@@ -126,5 +139,11 @@ class WaveformWidget(QWidget):
                 y_min = int(center_y - maxs[x] * half_height)
                 y_max = int(center_y - mins[x] * half_height)
                 painter.drawLine(x, y_min, x, y_max)
+
+        # Playback cursor
+        if self._cursor_position >= 0:
+            cursor_x = int(self._cursor_position * self.width())
+            painter.setPen(QPen(_CURSOR_COLOR, 2))
+            painter.drawLine(cursor_x, 0, cursor_x, self.height())
 
         painter.end()
