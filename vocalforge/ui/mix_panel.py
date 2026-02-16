@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QGroupBox,
@@ -32,7 +33,7 @@ class MixPanel(QWidget):
         align_row.addWidget(QLabel("Alignment:"))
         self._align_combo = QComboBox()
         self._align_combo.addItems(["None", "Background music", "Vocal matching"])
-        self._align_combo.setCurrentIndex(1)  # default to Background music
+        self._align_combo.setCurrentIndex(2)  # default to Vocal matching
         align_row.addWidget(self._align_combo, stretch=1)
         group_layout.addLayout(align_row)
 
@@ -45,11 +46,11 @@ class MixPanel(QWidget):
         slider_row.addWidget(QLabel("Vocal:"))
         self._vocal_slider = QSlider(Qt.Horizontal)
         self._vocal_slider.setRange(0, 100)
-        self._vocal_slider.setValue(50)
+        self._vocal_slider.setValue(75)
         self._vocal_slider.setTickPosition(QSlider.TicksBelow)
         self._vocal_slider.setTickInterval(25)
         slider_row.addWidget(self._vocal_slider, stretch=1)
-        self._vocal_value_label = QLabel("1.0x")
+        self._vocal_value_label = QLabel("1.5x")
         self._vocal_slider.valueChanged.connect(self._on_slider_changed)
         slider_row.addWidget(self._vocal_value_label)
         group_layout.addLayout(slider_row)
@@ -65,6 +66,18 @@ class MixPanel(QWidget):
         lufs_row.addWidget(self._lufs_spin)
         lufs_row.addStretch()
         group_layout.addLayout(lufs_row)
+
+        # Noise reduction controls
+        nr_row = QHBoxLayout()
+        self._nr_checkbox = QCheckBox("Noise reduction")
+        self._nr_checkbox.setChecked(True)
+        nr_row.addWidget(self._nr_checkbox)
+        self._nr_combo = QComboBox()
+        self._nr_combo.addItems(["Subtle", "Moderate", "Aggressive"])
+        self._nr_combo.setCurrentIndex(1)  # default Moderate
+        nr_row.addWidget(self._nr_combo, stretch=1)
+        self._nr_checkbox.toggled.connect(self._nr_combo.setEnabled)
+        group_layout.addLayout(nr_row)
 
         # Mix & Export button
         self._mix_btn = QPushButton("Mix && Export")
@@ -104,6 +117,13 @@ class MixPanel(QWidget):
         """Return the selected alignment mode: 'none', 'background', or 'vocal'."""
         index = self._align_combo.currentIndex()
         return ["none", "background", "vocal"][index]
+
+    def noise_reduction_enabled(self) -> bool:
+        return self._nr_checkbox.isChecked()
+
+    def noise_reduction_strength(self) -> float:
+        """Map combo selection to a prop_decrease value."""
+        return {0: 0.5, 1: 0.75, 2: 1.0}[self._nr_combo.currentIndex()]
 
     def set_mix_enabled(self, enabled: bool) -> None:
         self._mix_btn.setEnabled(enabled)

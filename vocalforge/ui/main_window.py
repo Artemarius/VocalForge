@@ -42,6 +42,8 @@ class _MixWorker(QThread):
         target_lufs: float,
         alignment_mode: str = "background",
         vocals_stem_path: str | None = None,
+        noise_reduction_enabled: bool = True,
+        noise_reduction_strength: float = 0.75,
     ):
         super().__init__()
         self._minus_data = minus_data
@@ -54,6 +56,8 @@ class _MixWorker(QThread):
         self._target_lufs = target_lufs
         self._alignment_mode = alignment_mode
         self._vocals_stem_path = vocals_stem_path
+        self._nr_enabled = noise_reduction_enabled
+        self._nr_strength = noise_reduction_strength
 
     def run(self) -> None:
         try:
@@ -89,6 +93,12 @@ class _MixWorker(QThread):
                 # Default: background music alignment
                 self.progress.emit("Aligning...")
                 aligned_vocal, align_info = align_tracks(self._minus_data, vocal, sr)
+
+            # Noise reduction
+            if self._nr_enabled and self._nr_strength > 0.0:
+                self.progress.emit("Reducing noise...")
+                from vocalforge.audio.noise_reduction import reduce_noise
+                aligned_vocal = reduce_noise(aligned_vocal, sr, strength=self._nr_strength)
 
             # Mix
             self.progress.emit("Mixing...")
@@ -341,6 +351,8 @@ class MainWindow(QMainWindow):
             target_lufs=self._mix_panel.target_lufs(),
             alignment_mode=alignment_mode,
             vocals_stem_path=self._vocals_stem_path,
+            noise_reduction_enabled=self._mix_panel.noise_reduction_enabled(),
+            noise_reduction_strength=self._mix_panel.noise_reduction_strength(),
         )
         self._mix_worker.progress.connect(self._mix_panel.set_status)
         self._mix_worker.finished.connect(self._on_mix_finished)

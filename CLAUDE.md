@@ -9,7 +9,7 @@ A Python desktop application for recording vocals over music tracks with automat
 ## Development Environment
 
 - **OS:** Windows 10 Pro (primary), Linux (secondary)
-- **Python:** 3.10+
+- **Python:** 3.12 via project venv (`.venv/Scripts/python.exe` on Windows — always use the venv, default `python` points to 3.14)
 - **IDE:** VS Code or command line
 - **Audio hardware:** Behringer X-Air 16 mixer, Shure SM58 mic (not needed for development — any mic works)
 - **GPU:** RTX 3060 6GB — available for Demucs inference but not required
@@ -156,6 +156,10 @@ Do not pull in components from later phases.
 ## Build & Run
 
 ```bash
+# Always use the project venv
+# Windows:  .venv\Scripts\activate   (or invoke .venv/Scripts/python.exe directly)
+# Linux:    source .venv/bin/activate
+
 # Install dependencies
 pip install -r requirements.txt
 
