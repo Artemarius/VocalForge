@@ -86,7 +86,6 @@ def _run_separation(
 ) -> tuple[np.ndarray, int]:
     """Run Demucs separation, with GPU→CPU fallback on OOM."""
     import torch
-    from demucs.api import Separator
 
     try:
         return _do_separate(audio_path, output_dir, cached_path, device, callback)
@@ -108,35 +107,40 @@ def _do_separate(
     callback: Callable[[str, float], None] | None,
 ) -> tuple[np.ndarray, int]:
     """Actually run the Demucs model and extract instrumental."""
-    from demucs.api import Separator
+    import torch
+    from demucs.apply import apply_model
+    from demucs.audio import AudioFile
+    from demucs.pretrained import get_model
 
-    separator = Separator(model="htdemucs_ft", device=device)
+    model = get_model("htdemucs_ft")
+    model.to(device)
+    sr = model.samplerate
 
     if callback:
         callback(f"Separating ({device.upper()})...", 0.1)
 
-    # Run separation
-    _, sources = separator.separate_audio_file(Path(audio_path))
+    # Load audio as tensor (channels, samples) at model sample rate
+    audio = AudioFile(Path(audio_path)).read(streams=0, samplerate=sr, channels=2)
+    mix = audio.to(device)
+
+    # Run separation — returns tensor (sources, channels, samples)
+    sources = apply_model(model, mix[None], device=device, progress=False)[0]
 
     if callback:
         callback("Combining stems...", 0.8)
 
     # Combine drums + bass + other → instrumental (no vocals)
-    # sources is a dict of stem_name → tensor(channels, samples)
+    # model.sources gives the stem order, e.g. ['drums', 'bass', 'other', 'vocals']
     instrumental = None
-    for stem_name in ("drums", "bass", "other"):
-        if stem_name in sources:
-            tensor = sources[stem_name]
+    for i, name in enumerate(model.sources):
+        if name in ("drums", "bass", "other"):
             if instrumental is None:
-                instrumental = tensor.clone()
+                instrumental = sources[i].clone()
             else:
-                instrumental += tensor
+                instrumental += sources[i]
 
     if instrumental is None:
         raise RuntimeError("Demucs did not produce expected stems")
-
-    # Get sample rate from the separator's model
-    sr = separator.samplerate
 
     # Convert tensor (channels, samples) → numpy (samples, channels) float32
     audio_data = instrumental.cpu().numpy().T.astype(np.float32)
