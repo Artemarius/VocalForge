@@ -1,6 +1,40 @@
-"""Noise reduction — spectral gating for vocal recordings."""
+"""Noise reduction — spectral gating and high-pass filtering for vocal recordings."""
 
 import numpy as np
+from scipy.signal import butter, sosfiltfilt
+
+
+def high_pass_filter(
+    data: np.ndarray, sample_rate: int, cutoff_hz: float = 80.0, order: int = 4,
+) -> np.ndarray:
+    """Apply a zero-phase Butterworth high-pass filter.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sample_rate: Sample rate in Hz.
+        cutoff_hz: Cutoff frequency in Hz. If <= 0, returns input unchanged.
+        order: Filter order (default 4).
+
+    Returns:
+        Filtered audio, same shape and dtype (float32) as input.
+    """
+    if cutoff_hz <= 0 or data.size == 0:
+        return data
+
+    nyq = sample_rate / 2.0
+    if cutoff_hz >= nyq:
+        return data
+
+    sos = butter(order, cutoff_hz / nyq, btype="high", output="sos")
+
+    if data.ndim == 1:
+        return sosfiltfilt(sos, data).astype(np.float32)
+
+    # Stereo / multichannel: filter each channel independently
+    channels = []
+    for ch in range(data.shape[1]):
+        channels.append(sosfiltfilt(sos, data[:, ch]).astype(np.float32))
+    return np.column_stack(channels)
 
 
 def estimate_noise_profile(
@@ -122,6 +156,7 @@ def reduce_noise(
     noise_clip: np.ndarray | None = None,
     strength: float = 1.0,
     guide_stem: np.ndarray | None = None,
+    hpf_cutoff_hz: float = 0.0,
 ) -> np.ndarray:
     """Apply spectral-gating noise reduction to audio.
 
@@ -134,16 +169,24 @@ def reduce_noise(
             Maps to the ``prop_decrease`` parameter of noisereduce.
         guide_stem: Optional separated vocal stem used to find silent regions
             for noise profiling.  Only used when noise_clip is None.
+        hpf_cutoff_hz: High-pass filter cutoff in Hz.  0 = disabled.
 
     Returns:
         Noise-reduced audio, same shape and dtype (float32) as input.
     """
-    if strength == 0.0:
+    if strength == 0.0 and hpf_cutoff_hz <= 0:
         return data
 
     # All-zeros or empty input — nothing to do
     if data.size == 0 or not np.any(data):
         return data.copy()
+
+    # Apply high-pass filter before spectral gating
+    if hpf_cutoff_hz > 0:
+        data = high_pass_filter(data, sample_rate, cutoff_hz=hpf_cutoff_hz)
+
+    if strength == 0.0:
+        return data
 
     import noisereduce as nr
 

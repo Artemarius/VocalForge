@@ -20,7 +20,7 @@ from vocalforge.utils.audio_io import get_audio_info, load_audio
 
 _FILE_FILTER = "Audio Files (*.wav *.flac *.ogg);;All Files (*)"
 
-_SLOT_NAMES = ("song", "minus_sep", "vocal_sep", "minus_import", "vocal")
+_SLOT_NAMES = ("song", "minus_sep", "vocal_sep", "minus_import", "vocal", "mix_result")
 
 
 class ImportPanel(QWidget):
@@ -69,6 +69,14 @@ class ImportPanel(QWidget):
                 "vocal", "Vocal Track", load_button="Load Vocal"
             )
         )
+
+        # --- Mix Result group ---
+        mix_group = QGroupBox("Mix Result")
+        mix_layout = QVBoxLayout(mix_group)
+        mix_layout.addWidget(
+            self._create_track_row("mix_result", "Not yet mixed")
+        )
+        layout.addWidget(mix_group)
 
         layout.addStretch()
 
@@ -289,3 +297,15 @@ class ImportPanel(QWidget):
     @property
     def vocal_track(self) -> tuple | None:
         return self._tracks["vocal"]
+
+    def set_mix_result_track(
+        self, data, sample_rate: int, path: str | None = None
+    ) -> None:
+        """Populate the mix result slot (after mix & export)."""
+        self._set_track_data(
+            "mix_result", data, sample_rate, path, "Mix result"
+        )
+
+    @property
+    def mix_result_track(self) -> tuple | None:
+        return self._tracks["mix_result"]

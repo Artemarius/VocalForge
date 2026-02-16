@@ -6,6 +6,7 @@ import pytest
 from vocalforge.audio.noise_reduction import (
     estimate_noise_from_stem,
     estimate_noise_profile,
+    high_pass_filter,
     reduce_noise,
 )
 
@@ -181,3 +182,76 @@ def test_reduce_noise_with_guide_stem():
     original_rms = np.sqrt(np.mean(vocal_rec[:SR].astype(np.float64) ** 2))
     reduced_rms = np.sqrt(np.mean(reduced[:SR].astype(np.float64) ** 2))
     assert reduced_rms < original_rms
+
+
+# --- high_pass_filter ---
+
+def test_hpf_removes_low_frequency():
+    """40 Hz tone should be attenuated >14 dB by an 80 Hz HPF."""
+    tone_40 = _make_tone(duration_s=1.0, freq=40, amplitude=0.5)
+    filtered = high_pass_filter(tone_40, SR, cutoff_hz=80.0)
+    # Compare RMS
+    rms_before = np.sqrt(np.mean(tone_40.astype(np.float64) ** 2))
+    rms_after = np.sqrt(np.mean(filtered.astype(np.float64) ** 2))
+    attenuation_db = 20 * np.log10(rms_after / rms_before)
+    assert attenuation_db < -14
+
+
+def test_hpf_preserves_high_frequency():
+    """440 Hz tone should be highly correlated after 80 Hz HPF."""
+    tone = _make_tone(duration_s=1.0, freq=440, amplitude=0.5)
+    filtered = high_pass_filter(tone, SR, cutoff_hz=80.0)
+    correlation = np.corrcoef(tone, filtered)[0, 1]
+    assert correlation > 0.99
+
+
+def test_hpf_disabled_when_zero():
+    """cutoff_hz=0 returns input unchanged."""
+    tone = _make_tone(duration_s=0.5, freq=100)
+    result = high_pass_filter(tone, SR, cutoff_hz=0.0)
+    np.testing.assert_array_equal(result, tone)
+
+
+def test_hpf_preserves_shape_mono():
+    """Mono shape (N,) is preserved."""
+    mono = _make_tone(duration_s=0.5)
+    assert mono.ndim == 1
+    result = high_pass_filter(mono, SR, cutoff_hz=80.0)
+    assert result.shape == mono.shape
+
+
+def test_hpf_preserves_shape_stereo():
+    """Stereo shape (N, 2) is preserved."""
+    mono = _make_tone(duration_s=0.5)
+    stereo = np.column_stack([mono, mono])
+    result = high_pass_filter(stereo, SR, cutoff_hz=80.0)
+    assert result.shape == stereo.shape
+
+
+def test_hpf_dtype_float32():
+    """Output is float32."""
+    tone = _make_tone(duration_s=0.5)
+    result = high_pass_filter(tone, SR, cutoff_hz=80.0)
+    assert result.dtype == np.float32
+
+
+def test_hpf_empty_input():
+    """Empty array doesn't crash."""
+    empty = np.array([], dtype=np.float32)
+    result = high_pass_filter(empty, SR, cutoff_hz=80.0)
+    assert result.size == 0
+
+
+def test_reduce_noise_with_hpf():
+    """HPF integrated into reduce_noise removes low-freq content."""
+    # Mix a 40 Hz rumble with a 440 Hz tone
+    rumble = _make_tone(duration_s=1.0, freq=40, amplitude=0.3)
+    tone = _make_tone(duration_s=1.0, freq=440, amplitude=0.5)
+    signal = rumble + tone
+
+    # Use strength=0 so only HPF acts (skip spectral gating)
+    result = reduce_noise(signal, SR, strength=0.0, hpf_cutoff_hz=80.0)
+
+    # The 440 Hz tone should be preserved, the 40 Hz rumble attenuated
+    corr_tone = np.corrcoef(tone, result)[0, 1]
+    assert corr_tone > 0.95

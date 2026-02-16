@@ -48,6 +48,8 @@ class _MixWorker(QThread):
         minus_sep_sr: int | None = None,
         vocal_sep_data: np.ndarray | None = None,
         vocal_sep_sr: int | None = None,
+        max_offset_s: float | None = None,
+        hpf_cutoff_hz: float = 0.0,
     ):
         super().__init__()
         self._minus_data = minus_data
@@ -66,6 +68,8 @@ class _MixWorker(QThread):
         self._minus_sep_sr = minus_sep_sr
         self._vocal_sep_data = vocal_sep_data
         self._vocal_sep_sr = vocal_sep_sr
+        self._max_offset_s = max_offset_s
+        self._hpf_cutoff_hz = hpf_cutoff_hz
 
     def run(self) -> None:
         try:
@@ -107,6 +111,7 @@ class _MixWorker(QThread):
                     minus_for_mix, aligned_vocal, align_info = chain_align(
                         minus_sep, vocal_sep, vocal, sr,
                         minus_import=minus_import,
+                        max_offset_s=self._max_offset_s,
                     )
                 elif self._vocals_stem_path is not None:
                     # Fallback: load vocal stem from file
@@ -119,7 +124,8 @@ class _MixWorker(QThread):
                         vocals_stem = resample_if_needed(vocals_stem, stem_sr, sr)
                     self.progress.emit("Aligning to vocals stem...")
                     aligned_vocal, align_info = align_tracks(
-                        vocals_stem, vocal, sr
+                        vocals_stem, vocal, sr,
+                        max_offset_s=self._max_offset_s,
                     )
                 else:
                     raise RuntimeError(
@@ -130,7 +136,8 @@ class _MixWorker(QThread):
                 # Default: background music alignment
                 self.progress.emit("Aligning...")
                 aligned_vocal, align_info = align_tracks(
-                    self._minus_data, vocal, sr
+                    self._minus_data, vocal, sr,
+                    max_offset_s=self._max_offset_s,
                 )
 
             # Noise reduction
@@ -145,6 +152,7 @@ class _MixWorker(QThread):
                     aligned_vocal, sr,
                     strength=self._nr_strength,
                     guide_stem=guide,
+                    hpf_cutoff_hz=self._hpf_cutoff_hz,
                 )
 
             # Mix
@@ -322,6 +330,8 @@ class MainWindow(QMainWindow):
             return self._import_panel.minus_import_track
         elif slot_name == "vocal":
             return self._import_panel.vocal_track
+        elif slot_name == "mix_result":
+            return self._import_panel.mix_result_track
         return None
 
     def _on_track_selected(self, slot_name: str) -> None:
@@ -433,6 +443,8 @@ class MainWindow(QMainWindow):
             minus_sep_sr=minus_sep_sr,
             vocal_sep_data=vocal_sep_data,
             vocal_sep_sr=vocal_sep_sr,
+            max_offset_s=self._mix_panel.max_offset_s(),
+            hpf_cutoff_hz=self._mix_panel.hpf_cutoff_hz(),
         )
         self._mix_worker.progress.connect(self._mix_panel.set_status)
         self._mix_worker.finished.connect(self._on_mix_finished)
@@ -446,6 +458,24 @@ class MainWindow(QMainWindow):
         self._mix_panel.set_status(
             f"Done — saved to {os.path.basename(result['output_path'])}"
         )
+
+        # Check for suspicious alignment
+        warnings = []
+        if result.get("suspicious") or result.get("vocal_suspicious"):
+            warnings.append("Vocal alignment may be incorrect (large offset)")
+        if result.get("minus_suspicious"):
+            warnings.append("Minus alignment may be incorrect (large offset)")
+        self._mix_panel.set_alignment_warning("; ".join(warnings))
+
+        # Load mix result into import panel for playback
+        output_path = result["output_path"]
+        try:
+            from vocalforge.utils.audio_io import load_audio
+            mix_data, mix_sr = load_audio(output_path)
+            self._import_panel.set_mix_result_track(mix_data, mix_sr, output_path)
+        except Exception:
+            pass  # non-critical — user can still find the file on disk
+
         self._mix_panel.set_mix_enabled(True)
         self._mix_worker = None
 

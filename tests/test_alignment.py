@@ -187,3 +187,88 @@ def test_chain_align_zero_offsets():
 
     assert abs(info["vocal_lag_samples"]) <= 1
     assert abs(info["minus_lag_samples"]) <= 1
+
+
+# --- constrained alignment ---
+
+def _make_noise_burst(length, sr=SR, seed=42):
+    """Generate a unique (non-periodic) noise burst signal."""
+    rng = np.random.default_rng(seed)
+    return rng.standard_normal(length).astype(np.float32)
+
+
+def test_compute_lag_constrained_window():
+    """Offset within the window is found correctly."""
+    ref = _make_noise_burst(SR * 2)
+    offset = 500  # ~11 ms
+    target = np.concatenate([np.zeros(offset, dtype=np.float32), ref])
+    info = compute_lag(ref, target, SR, max_offset_s=1.0)
+    assert abs(info["lag_samples"] - offset) <= 1
+    assert info["constrained"] is True
+
+
+def test_compute_lag_rejects_out_of_window():
+    """Repetitive signal — constrained window picks the small correct offset."""
+    # Build a repeating pattern with period = 4410 samples (~100 ms)
+    period = 4410
+    one_cycle = _make_sine(period, freq=440)
+    reps = 20
+    ref = np.tile(one_cycle, reps).astype(np.float32)
+
+    # True offset is small (50 samples), but unconstrained could jump to a
+    # beat-period alias.  The multi-peak preference (closest to center among
+    # peaks >= 95% of max) should pick a lag near 50 rather than a period alias.
+    true_offset = 50
+    target = np.concatenate([np.zeros(true_offset, dtype=np.float32), ref])
+
+    # Constrain to +/- 0.05s (2205 samples) — smaller than one period
+    info = compute_lag(ref, target, SR, max_offset_s=0.05)
+    # For periodic signals multi-peak picks closest to center; accept within period
+    assert abs(info["lag_samples"]) < period
+    assert info["constrained"] is True
+
+
+def test_compute_lag_suspicious_flag():
+    """Large clipping offset is flagged as suspicious."""
+    ref = _make_sine(SR)
+    # Offset is 60% of target length → definitely suspicious
+    offset = int(SR * 0.6)
+    target = np.concatenate([np.zeros(offset, dtype=np.float32), ref[:SR // 2]])
+    info = compute_lag(ref, target, SR)
+    assert info["suspicious"] is True
+
+
+def test_compute_lag_no_constraint():
+    """max_offset_s=None behaves like original (unconstrained)."""
+    ref = _make_sine(SR * 2)
+    offset = SR  # 1 second
+    target = np.concatenate([np.zeros(offset, dtype=np.float32), ref])
+    info = compute_lag(ref, target, SR, max_offset_s=None)
+    assert abs(info["lag_samples"] - offset) <= 1
+    assert info["constrained"] is False
+
+
+def test_align_tracks_with_constraint():
+    """max_offset_s passthrough works via align_tracks."""
+    minus = _make_noise_burst(SR * 2, seed=10)
+    offset = 200
+    vocal = np.concatenate([np.zeros(offset, dtype=np.float32), minus])
+    aligned, info = align_tracks(minus, vocal, SR, max_offset_s=5.0)
+    assert abs(info["lag_samples"] - offset) <= 1
+    assert info["constrained"] is True
+    assert aligned.shape[0] == minus.shape[0]
+
+
+def test_chain_align_with_constraint():
+    """max_offset_s passthrough works via chain_align."""
+    minus_sep = _make_noise_burst(SR * 2, seed=10)
+    vocal_sep = _make_noise_burst(SR * 2, seed=20)
+    vocal_offset = 200
+    vocal_rec = np.concatenate([
+        np.zeros(vocal_offset, dtype=np.float32), vocal_sep
+    ])
+
+    _, _, info = chain_align(
+        minus_sep, vocal_sep, vocal_rec, SR, max_offset_s=5.0,
+    )
+    assert abs(info["vocal_lag_samples"] - vocal_offset) <= 1

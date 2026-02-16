@@ -31,9 +31,10 @@ VocalForge/
 │   │   └── waveform.py      # Waveform display widget (shared)
 │   ├── audio/
 │   │   ├── __init__.py
-│   │   ├── engine.py        # Playback + recording streams (sounddevice)
-│   │   ├── alignment.py     # Cross-correlation alignment
-│   │   └── mixer.py         # LUFS normalization + mixing
+│   │   ├── engine.py           # Playback + recording streams (sounddevice)
+│   │   ├── alignment.py        # Cross-correlation alignment (constrained)
+│   │   ├── mixer.py            # LUFS normalization + mixing
+│   │   └── noise_reduction.py  # Spectral gating + high-pass filter
 │   ├── separation/
 │   │   ├── __init__.py
 │   │   └── demucs_worker.py # Demucs separation (runs in QThread)
@@ -43,6 +44,7 @@ VocalForge/
 ├── tests/
 │   ├── test_alignment.py
 │   ├── test_mixer.py
+│   ├── test_noise_reduction.py
 │   └── test_audio_io.py
 ├── requirements.txt
 ├── README.md

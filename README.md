@@ -11,10 +11,11 @@ My wife likes to sing. The workflow I had was: find a karaoke video, rip the aud
 - **Load a song** — import any audio file as the "plus" (original with vocals)
 - **Automatic vocal separation** — extract instrumental (minus) track using [Demucs](https://github.com/facebookresearch/demucs) (Meta's source separation model), or load your own minus track manually
 - **Record vocals** — play the minus track through speakers/headphones while recording microphone input, with simple Start / Stop / Finish controls
-- **Track preview** — switch between Song, Minus, and Vocal tracks for playback; seek by clicking waveforms or dragging the seek slider
-- **Automatic alignment** — three modes: background music cross-correlation, vocal stem matching (using Demucs-extracted vocals), or no alignment
+- **Track preview** — switch between Song, Minus (sep), Vocal (sep), Minus (import), Vocal, and Mix Result tracks for playback; seek by clicking waveforms or dragging the seek slider
+- **Automatic alignment** — three modes: background music cross-correlation, vocal stem matching (chain alignment through Demucs-extracted stems), or no alignment. Constrained search window prevents false matches on repetitive songs.
+- **Noise reduction** — stem-guided spectral gating with configurable high-pass filter (default 80 Hz) to remove mic rumble and room noise
 - **LUFS normalization & mixing** — normalize loudness (ITU-R BS.1770-4) and blend vocal + instrumental at configurable ratios
-- **Export demo track** — save the final mix as a WAV/FLAC file ready to share
+- **Export & preview** — save the final mix as a WAV/FLAC file and immediately play it back in-app for quick iteration
 
 ## Architecture
 

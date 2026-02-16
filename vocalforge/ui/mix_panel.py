@@ -1,6 +1,6 @@
 """Mix panel — mixing controls and export."""
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -10,10 +10,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt
 
 
 class MixPanel(QWidget):
@@ -79,6 +79,38 @@ class MixPanel(QWidget):
         self._nr_checkbox.toggled.connect(self._nr_combo.setEnabled)
         group_layout.addLayout(nr_row)
 
+        # HPF cutoff spinner (tied to NR enabled state)
+        hpf_row = QHBoxLayout()
+        hpf_row.addWidget(QLabel("HPF cutoff:"))
+        self._hpf_spin = QSpinBox()
+        self._hpf_spin.setRange(0, 200)
+        self._hpf_spin.setValue(80)
+        self._hpf_spin.setSuffix(" Hz")
+        self._hpf_spin.setToolTip("High-pass filter cutoff (0 = disabled)")
+        hpf_row.addWidget(self._hpf_spin)
+        hpf_row.addStretch()
+        self._nr_checkbox.toggled.connect(self._hpf_spin.setEnabled)
+        group_layout.addLayout(hpf_row)
+
+        # Max alignment offset spinner
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel("Max offset:"))
+        self._max_offset_spin = QSpinBox()
+        self._max_offset_spin.setRange(0, 300)
+        self._max_offset_spin.setValue(30)
+        self._max_offset_spin.setSuffix(" s")
+        self._max_offset_spin.setToolTip("Max alignment search window (0 = no limit)")
+        offset_row.addWidget(self._max_offset_spin)
+        offset_row.addStretch()
+        group_layout.addLayout(offset_row)
+
+        # Alignment warning label
+        self._alignment_warning = QLabel("")
+        self._alignment_warning.setStyleSheet("color: orange; font-weight: bold;")
+        self._alignment_warning.setVisible(False)
+        self._alignment_warning.setWordWrap(True)
+        group_layout.addWidget(self._alignment_warning)
+
         # Mix & Export button
         self._mix_btn = QPushButton("Mix && Export")
         self._mix_btn.setEnabled(False)
@@ -124,6 +156,26 @@ class MixPanel(QWidget):
     def noise_reduction_strength(self) -> float:
         """Map combo selection to a prop_decrease value."""
         return {0: 0.5, 1: 0.75, 2: 1.0}[self._nr_combo.currentIndex()]
+
+    def hpf_cutoff_hz(self) -> float:
+        """Return HPF cutoff in Hz, or 0.0 if NR is disabled."""
+        if not self._nr_checkbox.isChecked():
+            return 0.0
+        return float(self._hpf_spin.value())
+
+    def max_offset_s(self) -> float | None:
+        """Return max alignment offset in seconds, or None if 0 (no limit)."""
+        val = self._max_offset_spin.value()
+        return float(val) if val > 0 else None
+
+    def set_alignment_warning(self, text: str) -> None:
+        """Show or hide the alignment warning label."""
+        if text:
+            self._alignment_warning.setText(text)
+            self._alignment_warning.setVisible(True)
+        else:
+            self._alignment_warning.setText("")
+            self._alignment_warning.setVisible(False)
 
     def set_mix_enabled(self, enabled: bool) -> None:
         self._mix_btn.setEnabled(enabled)
