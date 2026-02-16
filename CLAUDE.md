@@ -117,14 +117,18 @@ Workflow:
 ### Recording Workflow State Machine
 
 ```
-IDLE → [Start] → RECORDING → [Finish] → PROCESSING → DONE
+IDLE → [Start] → RECORDING → [Finish] → SAVE → PROCESSING → DONE
                       ↓
                    [Stop] → IDLE (discard recording)
+
+Alternative (loaded vocal):
+IDLE → [Load Vocal] → PROCESSING → DONE
 ```
 
 - **IDLE:** minus track loaded, mic selected, ready
 - **RECORDING:** minus plays through output device, mic records to buffer
-- **PROCESSING:** alignment + normalization + mixing (automatic)
+- **SAVE:** raw recording auto-saved to disk as WAV (before any processing)
+- **PROCESSING:** alignment + normalization + mixing (automatic). Vocal source can be a live recording or a loaded file — pipeline is identical.
 - **DONE:** demo track ready, export button enabled
 
 ## Phase Boundaries
