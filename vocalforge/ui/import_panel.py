@@ -34,6 +34,11 @@ class ImportPanel(QWidget):
             "minus": None,
             "vocal": None,
         }
+        self._paths: dict[str, str | None] = {
+            "song": None,
+            "minus": None,
+            "vocal": None,
+        }
         self._waveforms: dict[str, WaveformWidget] = {}
         self._file_labels: dict[str, QLabel] = {}
         self._info_labels: dict[str, QLabel] = {}
@@ -102,6 +107,7 @@ class ImportPanel(QWidget):
             return
 
         self._tracks[slot_name] = (data, sample_rate)
+        self._paths[slot_name] = path
 
         # Update labels
         filename = os.path.basename(path)
@@ -119,6 +125,33 @@ class ImportPanel(QWidget):
         self._waveforms[slot_name].set_audio(data, sample_rate)
 
         self.track_loaded.emit(slot_name)
+
+    def get_track_path(self, slot_name: str) -> str | None:
+        """Return the file path for a given slot, or None."""
+        return self._paths.get(slot_name)
+
+    def set_vocal_track(self, data, sample_rate: int, path: str | None = None) -> None:
+        """Programmatically populate the vocal slot (e.g. after recording)."""
+        self._tracks["vocal"] = (data, sample_rate)
+        self._paths["vocal"] = path
+
+        # Update labels
+        if path:
+            filename = os.path.basename(path)
+        else:
+            filename = "Recording"
+        self._file_labels["vocal"].setText(filename)
+
+        duration = len(data) / sample_rate
+        ch_str = "mono" if data.ndim == 1 else f"{data.shape[1]}ch"
+        self._info_labels["vocal"].setText(
+            f"{duration:.1f}s | {ch_str} | {sample_rate} Hz"
+        )
+
+        # Update waveform
+        self._waveforms["vocal"].set_audio(data, sample_rate)
+
+        self.track_loaded.emit("vocal")
 
     def get_waveform(self, slot_name: str) -> WaveformWidget | None:
         """Return the WaveformWidget for a given slot, or None."""

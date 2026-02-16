@@ -1,13 +1,14 @@
-"""Record panel — audio device selection and recording controls.
+"""Record panel — audio device selection, playback, and recording controls.
 
 Phase 1: device selection dropdowns.
 Phase 3: playback transport controls and volume slider.
+Phase 4: recording controls with REC indicator and latency offset.
 """
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QGroupBox,
-    QPushButton, QSlider,
+    QPushButton, QSlider, QDoubleSpinBox,
 )
 
 from vocalforge.audio.engine import (
@@ -23,6 +24,11 @@ class RecordPanel(QWidget):
     stop_clicked = Signal()
     volume_changed = Signal(float)
     output_device_changed = Signal(object)
+    input_device_changed = Signal(object)
+    record_start_clicked = Signal()
+    record_finish_clicked = Signal()
+    record_stop_clicked = Signal()
+    latency_offset_changed = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -89,6 +95,45 @@ class RecordPanel(QWidget):
 
         layout.addWidget(playback_group)
 
+        # --- Recording group ---
+        recording_group = QGroupBox("Recording")
+        recording_layout = QVBoxLayout(recording_group)
+
+        # Record / Finish / Discard buttons
+        rec_btn_row = QHBoxLayout()
+        self._record_btn = QPushButton("Record")
+        self._finish_btn = QPushButton("Finish")
+        self._discard_btn = QPushButton("Discard")
+        self._record_btn.setEnabled(False)
+        self._finish_btn.setEnabled(False)
+        self._discard_btn.setEnabled(False)
+        rec_btn_row.addWidget(self._record_btn)
+        rec_btn_row.addWidget(self._finish_btn)
+        rec_btn_row.addWidget(self._discard_btn)
+        recording_layout.addLayout(rec_btn_row)
+
+        # REC indicator
+        self._rec_indicator = QLabel("REC")
+        self._rec_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._rec_indicator.setStyleSheet(
+            "color: red; font-weight: bold; font-size: 14px;"
+        )
+        self._rec_indicator.setVisible(False)
+        recording_layout.addWidget(self._rec_indicator)
+
+        # Latency offset
+        latency_row = QHBoxLayout()
+        latency_row.addWidget(QLabel("Latency offset (ms):"))
+        self._latency_spin = QDoubleSpinBox()
+        self._latency_spin.setRange(-500.0, 500.0)
+        self._latency_spin.setValue(0.0)
+        self._latency_spin.setSingleStep(1.0)
+        self._latency_spin.setDecimals(1)
+        latency_row.addWidget(self._latency_spin)
+        recording_layout.addLayout(latency_row)
+
+        layout.addWidget(recording_group)
+
         layout.addStretch()
 
         # Populate devices
@@ -101,6 +146,10 @@ class RecordPanel(QWidget):
         self._pause_btn.clicked.connect(self.pause_clicked)
         self._stop_btn.clicked.connect(self.stop_clicked)
         self._volume_slider.valueChanged.connect(self._on_volume_changed)
+        self._record_btn.clicked.connect(self.record_start_clicked)
+        self._finish_btn.clicked.connect(self.record_finish_clicked)
+        self._discard_btn.clicked.connect(self.record_stop_clicked)
+        self._latency_spin.valueChanged.connect(self._on_latency_changed)
 
     def _populate_devices(self):
         default_input = get_default_input_device()
@@ -131,6 +180,7 @@ class RecordPanel(QWidget):
     def _on_input_changed(self, index):
         if 0 <= index < len(self._input_devices):
             self._selected_input = self._input_devices[index]
+            self.input_device_changed.emit(self._selected_input)
 
     def _on_output_changed(self, index):
         if 0 <= index < len(self._output_devices):
@@ -141,15 +191,38 @@ class RecordPanel(QWidget):
         self._volume_label.setText(f"{value}%")
         self.volume_changed.emit(value / 100.0)
 
+    def _on_latency_changed(self, value: float) -> None:
+        self.latency_offset_changed.emit(value)
+
     def set_playback_enabled(self, enabled: bool) -> None:
         """Enable or disable the Play button (called when track loaded/cleared)."""
         self._play_btn.setEnabled(enabled)
+
+    def set_record_enabled(self, enabled: bool) -> None:
+        """Enable or disable the Record button."""
+        self._record_btn.setEnabled(enabled)
 
     def update_transport_state(self, playing: bool, paused: bool) -> None:
         """Sync button enabled states with engine state."""
         self._play_btn.setEnabled(not playing or paused)
         self._pause_btn.setEnabled(playing and not paused)
         self._stop_btn.setEnabled(playing or paused)
+
+    def update_recording_state(self, recording: bool) -> None:
+        """Toggle UI state for recording mode."""
+        self._rec_indicator.setVisible(recording)
+
+        # Recording buttons
+        self._record_btn.setEnabled(not recording)
+        self._finish_btn.setEnabled(recording)
+        self._discard_btn.setEnabled(recording)
+
+        # Disable playback controls and device combos during recording
+        self._play_btn.setEnabled(not recording)
+        self._pause_btn.setEnabled(False)
+        self._stop_btn.setEnabled(not recording)
+        self._input_combo.setEnabled(not recording)
+        self._output_combo.setEnabled(not recording)
 
     def update_time_display(self, current_sec: float, total_sec: float) -> None:
         """Format and display the current playback time."""
