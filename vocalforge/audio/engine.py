@@ -11,15 +11,26 @@ import numpy as np
 import sounddevice as sd
 
 
+def _default_hostapi_devices() -> set[int]:
+    """Return device indices belonging to the default host API."""
+    try:
+        api = sd.query_hostapis(sd.default.hostapi)
+        return set(api["devices"])
+    except Exception:
+        return set()
+
+
 def get_input_devices():
     """Return a list of available audio input devices.
 
     Each entry is a dict with keys: 'index', 'name', 'channels', 'sample_rate'.
+    Only devices from the default host API are returned.
     """
     devices = sd.query_devices()
+    api_devices = _default_hostapi_devices()
     result = []
     for i, dev in enumerate(devices):
-        if dev["max_input_channels"] > 0:
+        if i in api_devices and dev["max_input_channels"] > 0:
             result.append({
                 "index": i,
                 "name": dev["name"],
@@ -33,11 +44,13 @@ def get_output_devices():
     """Return a list of available audio output devices.
 
     Each entry is a dict with keys: 'index', 'name', 'channels', 'sample_rate'.
+    Only devices from the default host API are returned.
     """
     devices = sd.query_devices()
+    api_devices = _default_hostapi_devices()
     result = []
     for i, dev in enumerate(devices):
-        if dev["max_output_channels"] > 0:
+        if i in api_devices and dev["max_output_channels"] > 0:
             result.append({
                 "index": i,
                 "name": dev["name"],

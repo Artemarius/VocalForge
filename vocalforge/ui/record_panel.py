@@ -174,8 +174,10 @@ class RecordPanel(QWidget):
 
         if self._input_devices:
             self._input_combo.setCurrentIndex(select_input)
+            self._selected_input = self._input_devices[select_input]
         if self._output_devices:
             self._output_combo.setCurrentIndex(select_output)
+            self._selected_output = self._output_devices[select_output]
 
     def _on_input_changed(self, index):
         if 0 <= index < len(self._input_devices):

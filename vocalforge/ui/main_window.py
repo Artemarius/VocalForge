@@ -313,6 +313,12 @@ class MainWindow(QMainWindow):
 
     def _on_output_device_changed(self, device: dict) -> None:
         self._engine.set_device(device["index"], device["channels"])
+        # Restart stream if currently playing so device change takes effect
+        if self._engine.is_playing:
+            pos = self._engine.position
+            self._engine.stop()
+            self._engine.seek(pos)
+            self._engine.play()
 
     def _on_input_device_changed(self, device: dict) -> None:
         self._engine.set_input_device(device["index"], device["channels"])
