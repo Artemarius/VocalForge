@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from vocalforge.audio.alignment import align_tracks, resample_if_needed
 from vocalforge.audio.engine import AudioEngine
 from vocalforge.audio.mixer import mix_tracks
+from vocalforge.separation.demucs_worker import separate_song
 from vocalforge.ui.import_panel import ImportPanel
 from vocalforge.ui.mix_panel import MixPanel
 from vocalforge.ui.record_panel import RecordPanel
@@ -86,6 +87,45 @@ class _MixWorker(QThread):
             self.error.emit(str(exc))
 
 
+class _SeparationWorker(QThread):
+    """Background thread for Demucs source separation."""
+
+    progress = Signal(str)
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, song_path: str):
+        super().__init__()
+        self._song_path = song_path
+
+    def run(self) -> None:
+        try:
+            def _callback(message: str, fraction: float) -> None:
+                if fraction < 1.0:
+                    pct = int(fraction * 100)
+                    self.progress.emit(f"{message} {pct}%")
+                else:
+                    self.progress.emit(message)
+
+            data, sr = separate_song(
+                self._song_path,
+                callback=_callback,
+            )
+
+            # Build the cached path so MainWindow can pass it along
+            song_dir = os.path.dirname(os.path.abspath(self._song_path))
+            song_name = os.path.splitext(os.path.basename(self._song_path))[0]
+            cached_path = os.path.join(song_dir, f"{song_name}_stems", "no_vocals.wav")
+
+            self.finished.emit({
+                "data": data,
+                "sr": sr,
+                "path": cached_path,
+            })
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -110,8 +150,9 @@ class MainWindow(QMainWindow):
         # Audio engine
         self._engine = AudioEngine()
 
-        # Mix worker reference (prevent GC while running)
+        # Worker references (prevent GC while running)
         self._mix_worker: _MixWorker | None = None
+        self._separation_worker: _SeparationWorker | None = None
 
         # Position polling timer (30ms ~ 33 fps cursor updates)
         self._position_timer = QTimer(self)
@@ -132,6 +173,9 @@ class MainWindow(QMainWindow):
         self._record_panel.record_finish_clicked.connect(self._on_record_finish)
         self._record_panel.record_stop_clicked.connect(self._on_record_stop)
         self._record_panel.latency_offset_changed.connect(self._on_latency_offset_changed)
+
+        # Connect signals — separation
+        self._import_panel.separate_requested.connect(self._on_separate_start)
 
         # Connect signals — mix & export
         self._import_panel.track_loaded.connect(self._update_mix_ready)
@@ -223,6 +267,35 @@ class MainWindow(QMainWindow):
         self._mix_panel.set_mix_enabled(True)
         self._mix_worker = None
         QMessageBox.warning(self, "Mix Error", f"Mixing failed:\n{msg}")
+
+    # --- Separation ---
+
+    def _on_separate_start(self, song_path: str) -> None:
+        self._import_panel.set_separate_enabled(False)
+        self._import_panel.set_separate_progress("Starting separation...")
+
+        self._separation_worker = _SeparationWorker(song_path)
+        self._separation_worker.progress.connect(self._on_separate_progress)
+        self._separation_worker.finished.connect(self._on_separate_finished)
+        self._separation_worker.error.connect(self._on_separate_error)
+        self._separation_worker.start()
+
+    def _on_separate_progress(self, msg: str) -> None:
+        self._import_panel.set_separate_progress(msg)
+
+    def _on_separate_finished(self, result: dict) -> None:
+        self._import_panel.set_minus_track(
+            result["data"], result["sr"], result["path"]
+        )
+        self._import_panel.set_separate_enabled(True)
+        self._import_panel.set_separate_progress("")
+        self._separation_worker = None
+
+    def _on_separate_error(self, msg: str) -> None:
+        self._import_panel.set_separate_enabled(True)
+        self._import_panel.set_separate_progress("")
+        self._separation_worker = None
+        QMessageBox.warning(self, "Separation Error", f"Source separation failed:\n{msg}")
 
     # --- Device syncing ---
 

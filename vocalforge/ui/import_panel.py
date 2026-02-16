@@ -25,6 +25,7 @@ class ImportPanel(QWidget):
     """Panel with three track slots: Song, Minus, and Vocal."""
 
     track_loaded = Signal(str)  # emits slot name on successful load
+    separate_requested = Signal(str)  # emits song file path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -69,6 +70,13 @@ class ImportPanel(QWidget):
         btn.clicked.connect(functools.partial(self._on_load_clicked, slot_name))
         top_row.addWidget(btn)
 
+        # Separate button (song slot only)
+        if slot_name == "song":
+            self._separate_btn = QPushButton("Separate")
+            self._separate_btn.setEnabled(False)
+            self._separate_btn.clicked.connect(self._on_separate_clicked)
+            top_row.addWidget(self._separate_btn)
+
         file_label = QLabel("No file loaded")
         self._file_labels[slot_name] = file_label
         top_row.addWidget(file_label, stretch=1)
@@ -78,6 +86,12 @@ class ImportPanel(QWidget):
         info_label = QLabel("")
         self._info_labels[slot_name] = info_label
         group_layout.addWidget(info_label)
+
+        # Separation progress label (song slot only)
+        if slot_name == "song":
+            self._separate_progress_label = QLabel("")
+            self._separate_progress_label.setVisible(False)
+            group_layout.addWidget(self._separate_progress_label)
 
         # Waveform
         waveform = WaveformWidget()
@@ -124,7 +138,56 @@ class ImportPanel(QWidget):
         # Update waveform
         self._waveforms[slot_name].set_audio(data, sample_rate)
 
+        # Enable Separate button when song is loaded
+        if slot_name == "song":
+            self._separate_btn.setEnabled(True)
+
         self.track_loaded.emit(slot_name)
+
+    def _on_separate_clicked(self) -> None:
+        song_path = self._paths.get("song")
+        if song_path:
+            self.separate_requested.emit(song_path)
+
+    # --- Public API for separation ---
+
+    def set_separate_enabled(self, enabled: bool) -> None:
+        """Enable/disable the Separate button."""
+        self._separate_btn.setEnabled(enabled)
+
+    def set_separate_progress(self, text: str) -> None:
+        """Update the separation progress label. Empty string hides it."""
+        if text:
+            self._separate_progress_label.setText(text)
+            self._separate_progress_label.setVisible(True)
+        else:
+            self._separate_progress_label.setText("")
+            self._separate_progress_label.setVisible(False)
+
+    def set_minus_track(self, data, sample_rate: int, path: str | None = None) -> None:
+        """Programmatically populate the minus slot (e.g. after separation)."""
+        self._tracks["minus"] = (data, sample_rate)
+        self._paths["minus"] = path
+
+        # Update labels
+        if path:
+            filename = os.path.basename(path)
+        else:
+            filename = "Separated instrumental"
+        self._file_labels["minus"].setText(filename)
+
+        duration = len(data) / sample_rate
+        ch_str = "mono" if data.ndim == 1 else f"{data.shape[1]}ch"
+        self._info_labels["minus"].setText(
+            f"{duration:.1f}s | {ch_str} | {sample_rate} Hz"
+        )
+
+        # Update waveform
+        self._waveforms["minus"].set_audio(data, sample_rate)
+
+        self.track_loaded.emit("minus")
+
+    # --- Existing public API ---
 
     def get_track_path(self, slot_name: str) -> str | None:
         """Return the file path for a given slot, or None."""
