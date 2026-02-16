@@ -3,14 +3,87 @@
 import os
 from datetime import datetime
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QMessageBox
+import numpy as np
+from PySide6.QtCore import QThread, Signal, QTimer
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QMainWindow,
+    QMessageBox,
+    QWidget,
+)
 
+from vocalforge.audio.alignment import align_tracks, resample_if_needed
 from vocalforge.audio.engine import AudioEngine
+from vocalforge.audio.mixer import mix_tracks
 from vocalforge.ui.import_panel import ImportPanel
-from vocalforge.ui.record_panel import RecordPanel
 from vocalforge.ui.mix_panel import MixPanel
+from vocalforge.ui.record_panel import RecordPanel
 from vocalforge.utils.audio_io import save_audio
+
+
+class _MixWorker(QThread):
+    """Background thread for alignment + mixing + export."""
+
+    progress = Signal(str)
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        minus_data: np.ndarray,
+        minus_sr: int,
+        vocal_data: np.ndarray,
+        vocal_sr: int,
+        output_path: str,
+        vocal_gain: float,
+        instrumental_gain: float,
+        target_lufs: float,
+    ):
+        super().__init__()
+        self._minus_data = minus_data
+        self._minus_sr = minus_sr
+        self._vocal_data = vocal_data
+        self._vocal_sr = vocal_sr
+        self._output_path = output_path
+        self._vocal_gain = vocal_gain
+        self._instrumental_gain = instrumental_gain
+        self._target_lufs = target_lufs
+
+    def run(self) -> None:
+        try:
+            sr = self._minus_sr
+
+            # Resample vocal if sample rates differ
+            vocal = self._vocal_data
+            if self._vocal_sr != sr:
+                self.progress.emit("Resampling vocal...")
+                vocal = resample_if_needed(vocal, self._vocal_sr, sr)
+
+            # Align
+            self.progress.emit("Aligning...")
+            aligned_vocal, align_info = align_tracks(self._minus_data, vocal, sr)
+
+            # Mix
+            self.progress.emit("Mixing...")
+            mix_data, mix_info = mix_tracks(
+                self._minus_data,
+                aligned_vocal,
+                sr,
+                vocal_gain=self._vocal_gain,
+                instrumental_gain=self._instrumental_gain,
+                target_lufs=self._target_lufs,
+            )
+
+            # Save
+            self.progress.emit("Saving...")
+            save_audio(self._output_path, mix_data, sr)
+
+            result = {**align_info, **mix_info, "output_path": self._output_path}
+            self.finished.emit(result)
+
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +110,9 @@ class MainWindow(QMainWindow):
         # Audio engine
         self._engine = AudioEngine()
 
+        # Mix worker reference (prevent GC while running)
+        self._mix_worker: _MixWorker | None = None
+
         # Position polling timer (30ms ~ 33 fps cursor updates)
         self._position_timer = QTimer(self)
         self._position_timer.setInterval(30)
@@ -57,6 +133,10 @@ class MainWindow(QMainWindow):
         self._record_panel.record_stop_clicked.connect(self._on_record_stop)
         self._record_panel.latency_offset_changed.connect(self._on_latency_offset_changed)
 
+        # Connect signals — mix & export
+        self._import_panel.track_loaded.connect(self._update_mix_ready)
+        self._mix_panel.mix_export_clicked.connect(self._on_mix_export)
+
     # --- Track loading ---
 
     def _on_track_loaded(self, slot_name: str) -> None:
@@ -74,6 +154,75 @@ class MainWindow(QMainWindow):
         self._record_panel.update_transport_state(False, False)
         total_sec = self._engine.total_frames / self._engine.sample_rate
         self._record_panel.update_time_display(0.0, total_sec)
+
+    # --- Mix readiness ---
+
+    def _update_mix_ready(self, _slot_name: str = "") -> None:
+        """Enable mix button when both minus and vocal tracks are loaded."""
+        has_minus = self._import_panel.minus_track is not None
+        has_vocal = self._import_panel.vocal_track is not None
+        self._mix_panel.set_mix_enabled(has_minus and has_vocal)
+
+    # --- Mix & Export ---
+
+    def _on_mix_export(self) -> None:
+        minus = self._import_panel.minus_track
+        vocal = self._import_panel.vocal_track
+        if minus is None or vocal is None:
+            return
+
+        minus_data, minus_sr = minus
+        vocal_data, vocal_sr = vocal
+
+        # Choose output path
+        default_dir = ""
+        minus_path = self._import_panel.get_track_path("minus")
+        if minus_path:
+            default_dir = os.path.dirname(minus_path)
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Mixed Track",
+            os.path.join(default_dir, "mix.wav"),
+            "WAV Files (*.wav);;FLAC Files (*.flac);;All Files (*)",
+        )
+        if not output_path:
+            return
+
+        # Disable button and show progress
+        self._mix_panel.set_mix_enabled(False)
+        self._mix_panel.set_status("Starting...")
+
+        self._mix_worker = _MixWorker(
+            minus_data,
+            minus_sr,
+            vocal_data,
+            vocal_sr,
+            output_path,
+            vocal_gain=self._mix_panel.vocal_gain(),
+            instrumental_gain=self._mix_panel.instrumental_gain(),
+            target_lufs=self._mix_panel.target_lufs(),
+        )
+        self._mix_worker.progress.connect(self._mix_panel.set_status)
+        self._mix_worker.finished.connect(self._on_mix_finished)
+        self._mix_worker.error.connect(self._on_mix_error)
+        self._mix_worker.start()
+
+    def _on_mix_finished(self, result: dict) -> None:
+        self._mix_panel.set_alignment_info(
+            result["lag_ms"], result["lag_samples"]
+        )
+        self._mix_panel.set_status(
+            f"Done — saved to {os.path.basename(result['output_path'])}"
+        )
+        self._mix_panel.set_mix_enabled(True)
+        self._mix_worker = None
+
+    def _on_mix_error(self, msg: str) -> None:
+        self._mix_panel.set_status("Error")
+        self._mix_panel.set_mix_enabled(True)
+        self._mix_worker = None
+        QMessageBox.warning(self, "Mix Error", f"Mixing failed:\n{msg}")
 
     # --- Device syncing ---
 
