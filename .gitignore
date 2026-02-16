@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Demucs model cache (large, downloaded at runtime)
+# The actual cache lives in ~/.cache/torch/hub/ — not in repo
+
+# Private planning docs
+PROJECT.md
+
+# Audio test files (don't commit copyrighted music)
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+
+# Separated stems cache
+*_stems/
