@@ -70,9 +70,10 @@ def separate_song(
         output_dir = os.path.join(song_dir, f"{song_name}_stems")
 
     cached_path = os.path.join(output_dir, "no_vocals.wav")
+    vocals_cached_path = os.path.join(output_dir, "vocals.wav")
 
-    # Cache hit — load and return
-    if os.path.isfile(cached_path):
+    # Cache hit — only if both stems exist
+    if os.path.isfile(cached_path) and os.path.isfile(vocals_cached_path):
         if callback:
             callback("Loading cached stems...", 0.0)
         data, sr = sf.read(cached_path, dtype="float32")
