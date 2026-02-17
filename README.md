@@ -63,12 +63,18 @@ My wife likes to sing. The workflow I had was: find a karaoke video, rip the aud
 ## Installation
 
 ```bash
-git clone https://github.com/artem-2024/VocalForge.git
+git clone https://github.com/Artemarius/VocalForge.git
 cd VocalForge
 python -m venv venv
 source venv/bin/activate  # or venv\Scripts\activate on Windows
-pip install -r requirements.txt
-python -m vocalforge
+pip install .
+vocalforge
+```
+
+To include Demucs vocal separation (requires ~2 GB for PyTorch + model weights):
+
+```bash
+pip install ".[separation]"
 ```
 
 ## Usage
