@@ -108,6 +108,13 @@ class AudioEngine:
         self._total_frames: int = 0
         self._playback_ended: bool = False
 
+        # Multi-track playback state
+        self._multi_tracks: list[np.ndarray] = []
+        self._multi_offsets: list[int] = []
+        self._multi_gains: list[float] = []
+        self._multi_mutes: list[bool] = []
+        self._multi_mode: bool = False
+
         # Recording state
         self._input_stream: sd.InputStream | None = None
         self._input_device_index: int | None = None
@@ -118,13 +125,66 @@ class AudioEngine:
         self._latency_offset_ms: float = 0.0
 
     def load(self, audio_data: np.ndarray, sample_rate: int) -> None:
-        """Load audio data for playback. Stops any active stream."""
+        """Load audio data for playback. Stops any active stream. Clears multi mode."""
         self.stop()
         self._audio_data = audio_data
         self._sample_rate = sample_rate
         self._source_channels = 1 if audio_data.ndim == 1 else audio_data.shape[1]
         self._total_frames = audio_data.shape[0]
         self._position = 0
+        self._multi_mode = False
+
+    def load_multi(
+        self,
+        tracks: list[np.ndarray],
+        sample_rate: int,
+        offsets: list[int] | None = None,
+        gains: list[float] | None = None,
+        mutes: list[bool] | None = None,
+    ) -> None:
+        """Load multiple tracks for simultaneous playback.
+
+        Args:
+            tracks: List of audio arrays (each mono or stereo float32).
+            sample_rate: Common sample rate for all tracks.
+            offsets: Per-track start offset in samples (default all 0).
+            gains: Per-track linear gain (default all 1.0).
+            mutes: Per-track mute flags (default all False = audible).
+        """
+        self.stop()
+        n = len(tracks)
+        self._multi_tracks = list(tracks)
+        self._multi_offsets = list(offsets) if offsets else [0] * n
+        self._multi_gains = list(gains) if gains else [1.0] * n
+        self._multi_mutes = list(mutes) if mutes else [False] * n
+        self._sample_rate = sample_rate
+        self._multi_mode = True
+        self._position = 0
+
+        # Total frames = max(track_length + offset)
+        total = 0
+        for i, track in enumerate(tracks):
+            end = track.shape[0] + self._multi_offsets[i]
+            if end > total:
+                total = end
+        self._total_frames = total
+        # Set source channels to max across tracks for output channel count
+        max_ch = 1
+        for track in tracks:
+            ch = 1 if track.ndim == 1 else track.shape[1]
+            if ch > max_ch:
+                max_ch = ch
+        self._source_channels = max_ch
+
+    def set_multi_mute(self, index: int, muted: bool) -> None:
+        """Set the mute state for a multi-track slot. Safe during playback."""
+        if 0 <= index < len(self._multi_mutes):
+            self._multi_mutes[index] = muted
+
+    def set_multi_gain(self, index: int, gain: float) -> None:
+        """Set the gain for a multi-track slot. Safe during playback."""
+        if 0 <= index < len(self._multi_gains):
+            self._multi_gains[index] = gain
 
     def set_device(self, device_index: int, channels: int) -> None:
         """Set the output device. Channels are capped at 2."""
@@ -138,7 +198,9 @@ class AudioEngine:
 
     def play(self) -> None:
         """Start or resume playback."""
-        if self._audio_data is None:
+        if not self._multi_mode and self._audio_data is None:
+            return
+        if self._multi_mode and not self._multi_tracks:
             return
 
         if self._state == EngineState.PAUSED and self._stream is not None:
@@ -147,8 +209,17 @@ class AudioEngine:
             self._stream.start()
             return
 
-        # Start fresh stream
+        # Select callback based on mode
+        callback = (
+            self._multi_playback_callback
+            if self._multi_mode
+            else self._playback_callback
+        )
+
+        # Start fresh stream — preserve position for seamless restart
+        saved_pos = self._position
         self.stop()
+        self._position = saved_pos
         self._state = EngineState.PLAYING
         self._playback_ended = False
         self._stream = sd.OutputStream(
@@ -157,7 +228,7 @@ class AudioEngine:
             device=self._device_index,
             channels=self._channels,
             dtype="float32",
-            callback=self._playback_callback,
+            callback=callback,
             finished_callback=self._on_playback_finished,
         )
         self._stream.start()
@@ -180,8 +251,23 @@ class AudioEngine:
 
     def seek(self, frame: int) -> None:
         """Set the playback position to a specific frame."""
-        if self._audio_data is not None:
+        if self._audio_data is not None or self._multi_mode:
             self._position = max(0, min(frame, self._total_frames))
+
+    def set_multi_offset(self, index: int, offset: int) -> None:
+        """Update offset for a multi-track slot and recompute total_frames.
+
+        Safe during playback — the callback reads offsets atomically.
+        """
+        if 0 <= index < len(self._multi_offsets):
+            self._multi_offsets[index] = offset
+            # Recompute total frames
+            total = 0
+            for i, track in enumerate(self._multi_tracks):
+                end = track.shape[0] + self._multi_offsets[i]
+                if end > total:
+                    total = end
+            self._total_frames = total
 
     # --- Recording ---
 
@@ -424,6 +510,72 @@ class AudioEngine:
         valid = min(frames, remaining)
         buf[pos:pos + valid] = indata[:valid, 0]
         self._rec_position = pos + valid
+
+    def _multi_playback_callback(
+        self, outdata: np.ndarray, frames: int, time_info, status,
+    ) -> None:
+        """PortAudio callback for multi-track playback — sums unmuted tracks.
+
+        Lock-free: reads pre-stored numpy arrays, does small multiplies,
+        sums into outdata. No Python allocations beyond small numpy temps.
+        """
+        pos = self._position
+        remaining = self._total_frames - pos
+
+        if remaining <= 0:
+            outdata[:] = 0
+            raise sd.CallbackStop
+
+        valid = min(frames, remaining)
+        out_ch = outdata.shape[1]
+
+        outdata[:] = 0
+
+        tracks = self._multi_tracks
+        offsets = self._multi_offsets
+        gains = self._multi_gains
+        mutes = self._multi_mutes
+
+        for i in range(len(tracks)):
+            if mutes[i]:
+                continue
+
+            track = tracks[i]
+            offset = offsets[i]
+            gain = gains[i]
+
+            # Compute overlap of this track with the current output window
+            track_start = pos - offset
+            track_end = track_start + valid
+            track_len = track.shape[0]
+
+            if track_start >= track_len or track_end <= 0:
+                continue
+
+            # Clamp to valid track range
+            src_start = max(0, track_start)
+            src_end = min(track_len, track_end)
+            dst_start = src_start - track_start
+            dst_end = dst_start + (src_end - src_start)
+
+            src_ch = 1 if track.ndim == 1 else track.shape[1]
+
+            if track.ndim == 1:
+                chunk = track[src_start:src_end] * gain
+                for ch in range(out_ch):
+                    outdata[dst_start:dst_end, ch] += chunk
+            else:
+                mix_ch = min(src_ch, out_ch)
+                outdata[dst_start:dst_end, :mix_ch] += (
+                    track[src_start:src_end, :mix_ch] * gain
+                )
+
+        if valid < frames:
+            # Already zeroed from outdata[:] = 0 above
+            self._position = pos + valid
+            raise sd.CallbackStop
+
+        self._position = pos + valid
 
     def _on_playback_finished(self) -> None:
         """Called by PortAudio when the output stream finishes (end of audio)."""

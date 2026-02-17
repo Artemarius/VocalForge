@@ -5,6 +5,37 @@ from scipy.signal import fftconvolve, resample_poly
 from math import gcd
 
 
+def shift_track(
+    data: np.ndarray, offset_samples: int, target_length: int,
+) -> np.ndarray:
+    """Shift audio by offset_samples and pad/trim to target_length.
+
+    Positive offset means the data is late (trim from start).
+    Negative offset means the data is early (prepend zeros).
+
+    Args:
+        data: Audio array, shape (N,) or (N, C).
+        offset_samples: Lag in samples. Positive = late, negative = early.
+        target_length: Desired output length in samples.
+
+    Returns:
+        Shifted audio with shape (target_length,) or (target_length, C).
+    """
+    if offset_samples > 0:
+        shifted = data[offset_samples:] if offset_samples < len(data) else data[:0]
+    elif offset_samples < 0:
+        pad_len = -offset_samples
+        if data.ndim == 1:
+            pad = np.zeros(pad_len, dtype=data.dtype)
+        else:
+            pad = np.zeros((pad_len, data.shape[1]), dtype=data.dtype)
+        shifted = np.concatenate([pad, data], axis=0)
+    else:
+        shifted = data
+
+    return pad_or_trim(shifted, target_length)
+
+
 def pad_or_trim(vocal_data: np.ndarray, target_length: int) -> np.ndarray:
     """Pad with silence or trim vocal to match target length."""
     current_length = vocal_data.shape[0]
@@ -155,33 +186,7 @@ def align_tracks(
     lag = info["lag_samples"]
 
     target_len = minus_data.shape[0]
-
-    if lag > 0:
-        # Vocal is late — trim from start
-        shifted = vocal_data[lag:] if lag < len(vocal_data) else vocal_data[:0]
-    elif lag < 0:
-        # Vocal is early — prepend zeros
-        pad_len = -lag
-        if vocal_data.ndim == 1:
-            pad = np.zeros(pad_len, dtype=vocal_data.dtype)
-        else:
-            pad = np.zeros((pad_len, vocal_data.shape[1]), dtype=vocal_data.dtype)
-        shifted = np.concatenate([pad, vocal_data], axis=0)
-    else:
-        shifted = vocal_data
-
-    # Trim or pad to match minus length
-    if shifted.shape[0] > target_len:
-        aligned = shifted[:target_len]
-    elif shifted.shape[0] < target_len:
-        deficit = target_len - shifted.shape[0]
-        if shifted.ndim == 1:
-            pad = np.zeros(deficit, dtype=shifted.dtype)
-        else:
-            pad = np.zeros((deficit, shifted.shape[1]), dtype=shifted.dtype)
-        aligned = np.concatenate([shifted, pad], axis=0)
-    else:
-        aligned = shifted
+    aligned = shift_track(vocal_data, lag, target_len)
 
     return aligned, info
 

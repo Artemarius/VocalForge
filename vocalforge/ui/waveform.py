@@ -24,6 +24,11 @@ class WaveformWidget(QWidget):
         self._channels: int = 0
         self._envelope: list[tuple[np.ndarray, np.ndarray]] | None = None
         self._cursor_position: float = -1.0  # normalized 0.0–1.0, -1.0 = hidden
+        # Offset visualization: place this waveform at a position in a global timeline
+        self._offset_samples: int = 0
+        self._total_duration_samples: int = 0
+        # Display gain: visual scaling applied in paintEvent (no data recompute)
+        self._display_gain: float = 1.0
         self.setMinimumHeight(60)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -40,6 +45,36 @@ class WaveformWidget(QWidget):
         self._compute_envelope()
         self.update()
 
+    def set_offset(self, offset_samples: int, total_duration_samples: int) -> None:
+        """Set this waveform's position within a global timeline.
+
+        When set, the envelope is recomputed to show the waveform at its
+        offset within the total duration. All waveforms sharing the same
+        total_duration_samples will have a consistent timeline scale.
+
+        Args:
+            offset_samples: Start offset of this track in the global timeline.
+            total_duration_samples: Total duration of the global timeline.
+        """
+        self._offset_samples = offset_samples
+        self._total_duration_samples = total_duration_samples
+        if self._data is not None:
+            self._compute_envelope()
+            self.update()
+
+    def clear_offset(self) -> None:
+        """Reset to local-only timeline (no global offset)."""
+        self._offset_samples = 0
+        self._total_duration_samples = 0
+        if self._data is not None:
+            self._compute_envelope()
+            self.update()
+
+    def set_display_gain(self, gain: float) -> None:
+        """Set visual gain multiplier for the waveform. Triggers repaint only."""
+        self._display_gain = max(0.0, gain)
+        self.update()
+
     def clear(self) -> None:
         """Reset to blank state."""
         self._data = None
@@ -47,6 +82,9 @@ class WaveformWidget(QWidget):
         self._channels = 0
         self._envelope = None
         self._cursor_position = -1.0
+        self._offset_samples = 0
+        self._total_duration_samples = 0
+        self._display_gain = 1.0
         self.update()
 
     def set_cursor_position(self, normalized: float) -> None:
@@ -71,7 +109,12 @@ class WaveformWidget(QWidget):
             self._compute_envelope()
 
     def _compute_envelope(self) -> None:
-        """Compute min/max envelope per pixel column for each channel."""
+        """Compute min/max envelope per pixel column for each channel.
+
+        When offset visualization is active (total_duration_samples > 0),
+        the envelope is computed within the global timeline so that the
+        waveform occupies only its proportional pixel range.
+        """
         if self._data is None:
             self._envelope = None
             return
@@ -87,20 +130,52 @@ class WaveformWidget(QWidget):
         else:
             channels = [data[:, ch] for ch in range(data.shape[1])]
 
+        use_global = (
+            self._total_duration_samples > 0
+            and self._total_duration_samples >= data.shape[0]
+        )
+
         envelope = []
         for ch_data in channels:
             n_samples = len(ch_data)
-            if n_samples <= width:
-                # Fewer samples than pixels — one sample per column
-                envelope.append((ch_data.copy(), ch_data.copy()))
-            else:
-                # Bin samples into pixel columns
-                bin_size = n_samples // width
-                usable = bin_size * width
-                reshaped = ch_data[:usable].reshape(width, bin_size)
-                mins = reshaped.min(axis=1)
-                maxs = reshaped.max(axis=1)
+
+            if use_global:
+                total = self._total_duration_samples
+                offset = self._offset_samples
+
+                # Initialize full-width silent envelope
+                mins = np.zeros(width, dtype=np.float32)
+                maxs = np.zeros(width, dtype=np.float32)
+
+                # Compute pixel range for this track's data
+                px_start = int(offset / total * width) if total > 0 else 0
+                px_end = int((offset + n_samples) / total * width) if total > 0 else width
+                px_start = max(0, min(px_start, width))
+                px_end = max(px_start, min(px_end, width))
+
+                track_width = px_end - px_start
+                if track_width > 0 and n_samples > 0:
+                    if n_samples <= track_width:
+                        mins[px_start:px_start + n_samples] = ch_data
+                        maxs[px_start:px_start + n_samples] = ch_data
+                    else:
+                        bin_size = n_samples // track_width
+                        usable = bin_size * track_width
+                        reshaped = ch_data[:usable].reshape(track_width, bin_size)
+                        mins[px_start:px_end] = reshaped.min(axis=1)
+                        maxs[px_start:px_end] = reshaped.max(axis=1)
+
                 envelope.append((mins, maxs))
+            else:
+                if n_samples <= width:
+                    envelope.append((ch_data.copy(), ch_data.copy()))
+                else:
+                    bin_size = n_samples // width
+                    usable = bin_size * width
+                    reshaped = ch_data[:usable].reshape(width, bin_size)
+                    mins = reshaped.min(axis=1)
+                    maxs = reshaped.max(axis=1)
+                    envelope.append((mins, maxs))
 
         self._envelope = envelope
 
@@ -140,13 +215,14 @@ class WaveformWidget(QWidget):
                 painter.setPen(QPen(_SEPARATOR_COLOR, 1))
                 painter.drawLine(0, y_offset, self.width(), y_offset)
 
-            # Waveform
+            # Waveform (scaled by display gain)
             painter.setPen(QPen(_WAVE_COLOR, 1))
             half_height = ch_height / 2.0
+            g = self._display_gain
             n_cols = len(mins)
             for x in range(n_cols):
-                y_min = int(center_y - maxs[x] * half_height)
-                y_max = int(center_y - mins[x] * half_height)
+                y_min = int(center_y - maxs[x] * g * half_height)
+                y_max = int(center_y - mins[x] * g * half_height)
                 painter.drawLine(x, y_min, x, y_max)
 
         # Playback cursor

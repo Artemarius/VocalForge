@@ -68,6 +68,7 @@ def mix_tracks(
     vocal_gain: float = 1.0,
     instrumental_gain: float = 1.0,
     target_lufs: float = -14.0,
+    apply_limiter: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Full mixing pipeline: normalize, gain, sum, final normalize, limit.
 
@@ -78,9 +79,11 @@ def mix_tracks(
         vocal_gain: Linear gain for vocal (1.0 = unity).
         instrumental_gain: Linear gain for instrumental (1.0 = unity).
         target_lufs: Target integrated loudness for the final mix.
+        apply_limiter: If True (default), apply peak_limit() to the mix.
+            Set to False when the caller applies effects.limiter() instead.
 
     Returns:
-        (mix_array, info_dict) where mix_array is float32 stereo, peak-limited.
+        (mix_array, info_dict) where mix_array is float32 stereo.
     """
     minus_s = ensure_stereo(minus)
     vocal_s = ensure_stereo(vocal)
@@ -97,7 +100,8 @@ def mix_tracks(
     mix = normalize_to_lufs(mix, sr, target_lufs)
 
     # Peak limit
-    mix = peak_limit(mix)
+    if apply_limiter:
+        mix = peak_limit(mix)
 
     info = {
         "minus_lufs": measure_lufs(minus_s, sr),

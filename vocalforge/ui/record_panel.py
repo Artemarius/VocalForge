@@ -3,11 +3,12 @@
 Phase 1: device selection dropdowns.
 Phase 3: playback transport controls and volume slider.
 Phase 4: recording controls with REC indicator and latency offset.
+Phase 7: mute checkboxes per track (no dropdown).
 """
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QGroupBox,
+    QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QGroupBox,
     QPushButton, QSlider, QDoubleSpinBox,
 )
 
@@ -29,8 +30,8 @@ class RecordPanel(QWidget):
     record_finish_clicked = Signal()
     record_stop_clicked = Signal()
     latency_offset_changed = Signal(float)
-    track_selected = Signal(str)  # emits slot name: "song", "minus", "vocal"
-    seek_requested = Signal(float)  # emits normalized position 0.0–1.0
+    seek_requested = Signal(float)  # emits normalized position 0.0-1.0
+    mute_state_changed = Signal(object)  # emits dict {slot_name: is_audible}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,17 +67,28 @@ class RecordPanel(QWidget):
         playback_group = QGroupBox("Playback")
         playback_layout = QVBoxLayout(playback_group)
 
-        # Track selector
-        track_row = QHBoxLayout()
-        track_row.addWidget(QLabel("Track:"))
-        self._track_combo = QComboBox()
-        self._track_combo.addItems(
-            ["Song", "Minus (sep)", "Vocal (sep)", "Minus (import)", "Vocal",
-             "Mix Result"]
-        )
-        self._track_combo.setCurrentIndex(1)  # default to Minus (sep)
-        track_row.addWidget(self._track_combo, stretch=1)
-        playback_layout.addLayout(track_row)
+        # Mute checkboxes — per-track audibility
+        mute_label = QLabel("Audible tracks:")
+        playback_layout.addWidget(mute_label)
+        mute_row = QHBoxLayout()
+        self._mute_checks: dict[str, QCheckBox] = {}
+        mute_labels = [
+            ("song", "Song"),
+            ("minus_sep", "M-sep"),
+            ("vocal_sep", "V-sep"),
+            ("minus_import", "M-imp"),
+            ("vocal", "Vocal"),
+            ("vocal_processed", "V-proc"),
+            ("mix_result", "Mix"),
+        ]
+        for slot_name, short_label in mute_labels:
+            cb = QCheckBox(short_label)
+            cb.setChecked(False)
+            cb.setToolTip(f"Toggle audibility: {slot_name}")
+            cb.toggled.connect(self._on_mute_toggled)
+            self._mute_checks[slot_name] = cb
+            mute_row.addWidget(cb)
+        playback_layout.addLayout(mute_row)
 
         # Transport buttons
         btn_row = QHBoxLayout()
@@ -170,7 +182,6 @@ class RecordPanel(QWidget):
         self._finish_btn.clicked.connect(self.record_finish_clicked)
         self._discard_btn.clicked.connect(self.record_stop_clicked)
         self._latency_spin.valueChanged.connect(self._on_latency_changed)
-        self._track_combo.currentIndexChanged.connect(self._on_track_changed)
         self._seek_slider.sliderReleased.connect(self._on_seek_released)
 
     def _populate_devices(self):
@@ -218,14 +229,23 @@ class RecordPanel(QWidget):
     def _on_latency_changed(self, value: float) -> None:
         self.latency_offset_changed.emit(value)
 
-    def _on_track_changed(self, index: int) -> None:
-        names = ["song", "minus_sep", "vocal_sep", "minus_import", "vocal",
-                 "mix_result"]
-        if 0 <= index < len(names):
-            self.track_selected.emit(names[index])
-
     def _on_seek_released(self) -> None:
         self.seek_requested.emit(self._seek_slider.value() / 10000.0)
+
+    def _on_mute_toggled(self, _checked: bool) -> None:
+        self.mute_state_changed.emit(self.get_mute_states())
+
+    def get_mute_states(self) -> dict:
+        """Return {slot_name: is_audible} for all mute checkboxes."""
+        return {name: cb.isChecked() for name, cb in self._mute_checks.items()}
+
+    def set_mute_checked(self, slot_name: str, checked: bool) -> None:
+        """Programmatically check/uncheck a mute checkbox."""
+        cb = self._mute_checks.get(slot_name)
+        if cb is not None:
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
 
     def set_playback_enabled(self, enabled: bool) -> None:
         """Enable or disable the Play button (called when track loaded/cleared)."""
@@ -257,7 +277,6 @@ class RecordPanel(QWidget):
         self._input_combo.setEnabled(not recording)
         self._output_combo.setEnabled(not recording)
         self._seek_slider.setEnabled(not recording)
-        self._track_combo.setEnabled(not recording)
 
     def update_time_display(self, current_sec: float, total_sec: float) -> None:
         """Format and display the current playback time."""
