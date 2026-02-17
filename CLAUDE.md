@@ -137,14 +137,15 @@ IDLE → [Load Vocal] → PROCESSING → DONE
 
 Development follows PROJECT.md phases. Each phase is self-contained:
 
-- **Phase 1:** Project skeleton, PySide6 window, audio device enumeration
-- **Phase 2:** Audio file loading + waveform display
-- **Phase 3:** Playback engine (play/pause/stop minus track)
-- **Phase 4:** Recording engine (simultaneous playback + recording)
-- **Phase 5:** Alignment + mixing + export pipeline
-- **Phase 6:** Demucs integration (source separation)
-- **Phase 7:** UI polish, error handling, settings persistence
-- **Phase 8:** Testing, packaging, README screenshots
+- **Phases 1–5:** Core workflow — skeleton, audio loading, playback, recording, alignment + mixing [DONE]
+- **Phase 6 (a–d):** Demucs separation, noise reduction, chain alignment, constrained alignment, HPF [DONE]
+- **Phase 7 (a–d):** Interactive alignment, multi-track preview, offset sliders, mono waveforms [DONE]
+- **Phase 8a:** Noise gate + de-reverb + preset system [v0.2.0]
+- **Phase 8b:** Parametric EQ + compressor [v0.3.0]
+- **Phase 8c:** De-esser + reverb — completes all 9 vocal enhancers [v0.4.0]
+- **Phase 10:** Auto-tune research & prototyping [v0.6.0]
+- **Phase 11:** Settings persistence, drag-and-drop, error handling [v0.5.0]
+- **Phase 12:** Testing, PyInstaller exe, README screenshots [v0.5.0]
 
 Do not pull in components from later phases.
 
