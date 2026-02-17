@@ -4,12 +4,16 @@ import os
 from datetime import datetime
 
 import numpy as np
-from PySide6.QtCore import QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
+    QSpinBox,
     QWidget,
 )
 
@@ -643,7 +647,15 @@ class MainWindow(QMainWindow):
     # --- Waveform offset helpers ---
 
     def _update_waveform_offsets(self) -> None:
-        """Recompute global timeline and update all waveform offset visuals."""
+        """Recompute global timeline and update all waveform offset visuals.
+
+        Converts lag values (positive = trim from start) to delay values
+        (positive = starts later) using: delay = max_lag - track_lag.
+        """
+        minus_lag = self._minus_offset_samples
+        vocal_lag = self._vocal_offset_samples
+        max_lag = max(0, minus_lag, vocal_lag)
+
         offsets = {}
         total = 0
         for slot in _SLOT_NAMES:
@@ -652,12 +664,15 @@ class MainWindow(QMainWindow):
                 continue
             data, sr = track
             track_len = data.shape[0]
-            if slot in ("minus_import", "minus_sep"):
-                off = max(0, self._minus_offset_samples)
+            if slot == "minus_import":
+                off = max_lag - minus_lag
             elif slot in ("vocal", "vocal_processed"):
-                off = max(0, self._vocal_offset_samples)
-            else:
+                off = max_lag - vocal_lag
+            elif slot == "mix_result":
                 off = 0
+            else:
+                # song, minus_sep, vocal_sep: reference tracks (lag=0)
+                off = max_lag
             offsets[slot] = off
             end = track_len + off
             if end > total:
@@ -688,6 +703,11 @@ class MainWindow(QMainWindow):
         if target_sr is None:
             return
 
+        # Convert lag values to delay values for multi-track playback
+        minus_lag = self._minus_offset_samples
+        vocal_lag = self._vocal_offset_samples
+        max_lag = max(0, minus_lag, vocal_lag)
+
         tracks = []
         offsets = []
         gains = []
@@ -701,12 +721,15 @@ class MainWindow(QMainWindow):
             if sr != target_sr:
                 data = resample_if_needed(data, sr, target_sr)
 
-            if slot in ("minus_import", "minus_sep"):
-                off = max(0, self._minus_offset_samples)
+            if slot == "minus_import":
+                off = max_lag - minus_lag
             elif slot in ("vocal", "vocal_processed"):
-                off = max(0, self._vocal_offset_samples)
-            else:
+                off = max_lag - vocal_lag
+            elif slot == "mix_result":
                 off = 0
+            else:
+                # song, minus_sep, vocal_sep: reference tracks (lag=0)
+                off = max_lag
 
             gain = self._import_panel.get_track_gain(slot)
             tracks.append(data)
@@ -1193,3 +1216,24 @@ class MainWindow(QMainWindow):
     def _on_track_gain_changed(self, slot_name: str, gain: float) -> None:
         """Handle per-track volume fader changes — rebuild multi-track."""
         self._update_multi_playback()
+
+    # --- Keyboard shortcuts ---
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space:
+            # Skip when focused widget is a text-entry control
+            focused = self.focusWidget()
+            if isinstance(focused, (QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit)):
+                super().keyPressEvent(event)
+                return
+            # Skip during recording
+            if self._engine.is_recording:
+                super().keyPressEvent(event)
+                return
+            # Toggle play/pause
+            if self._engine.is_playing:
+                self._on_pause()
+            else:
+                self._on_play()
+            return
+        super().keyPressEvent(event)

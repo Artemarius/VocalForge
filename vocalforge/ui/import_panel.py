@@ -160,6 +160,14 @@ class ImportPanel(QWidget):
             )
             top_row.addWidget(btn)
 
+            # Clear button for minus_import
+            if slot_name == "minus_import":
+                clear_btn = QPushButton("\u2715")
+                clear_btn.setFixedSize(24, 24)
+                clear_btn.setToolTip("Clear minus import")
+                clear_btn.clicked.connect(self._clear_minus_import)
+                top_row.addWidget(clear_btn)
+
         # Separate button (song slot only)
         if slot_name == "song":
             self._separate_btn = QPushButton("Separate")
@@ -187,6 +195,8 @@ class ImportPanel(QWidget):
         waveform = WaveformWidget()
         self._waveforms[slot_name] = waveform
         group_layout.addWidget(waveform, stretch=1)
+
+        group_layout.addSpacing(6)
 
         # Volume slider
         group_layout.addLayout(self._create_volume_row(slot_name))
@@ -217,6 +227,8 @@ class ImportPanel(QWidget):
         waveform = WaveformWidget()
         self._waveforms[slot_name] = waveform
         container_layout.addWidget(waveform, stretch=1)
+
+        container_layout.addSpacing(6)
 
         # Volume slider
         container_layout.addLayout(self._create_volume_row(slot_name))
@@ -274,6 +286,18 @@ class ImportPanel(QWidget):
             self._separate_btn.setEnabled(True)
 
         self.track_loaded.emit(slot_name)
+
+    def _clear_minus_import(self) -> None:
+        """Clear the minus import track slot."""
+        self._tracks["minus_import"] = None
+        self._paths["minus_import"] = None
+        self._file_labels["minus_import"].setText("No file loaded")
+        self._info_labels["minus_import"].setText("")
+        self._waveforms["minus_import"].clear()
+        slider = self._vol_sliders.get("minus_import")
+        if slider:
+            slider.setValue(100)
+        self.track_loaded.emit("minus_import")
 
     def _on_separate_clicked(self) -> None:
         song_path = self._paths.get("song")
@@ -356,7 +380,7 @@ class ImportPanel(QWidget):
         """Populate the vocal_processed slot (after effects chain)."""
         self._set_track_data(
             "vocal_processed", data, sample_rate, path, "Processed vocal",
-            normalize=False,  # already processed, don't re-normalize
+            normalize=True,
         )
 
     # --- Volume fader access ---

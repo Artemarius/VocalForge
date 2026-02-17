@@ -50,30 +50,30 @@ class MixPanel(QWidget):
         align_row.addWidget(self._align_combo, stretch=1)
         align_layout.addLayout(align_row)
 
-        # Minus offset spinner
+        # Minus offset slider
         minus_off_row = QHBoxLayout()
         minus_off_row.addWidget(QLabel("Minus offset:"))
-        self._minus_offset_spin = QDoubleSpinBox()
-        self._minus_offset_spin.setRange(-60000.0, 60000.0)
-        self._minus_offset_spin.setValue(0.0)
-        self._minus_offset_spin.setSingleStep(1.0)
-        self._minus_offset_spin.setDecimals(1)
-        self._minus_offset_spin.setSuffix(" ms")
-        minus_off_row.addWidget(self._minus_offset_spin)
-        minus_off_row.addStretch()
+        self._minus_offset_slider = QSlider(Qt.Horizontal)
+        self._minus_offset_slider.setRange(-60000, 60000)
+        self._minus_offset_slider.setValue(0)
+        self._minus_offset_slider.setSingleStep(1)
+        minus_off_row.addWidget(self._minus_offset_slider, stretch=1)
+        self._minus_offset_label = QLabel("0 ms")
+        self._minus_offset_label.setFixedWidth(70)
+        minus_off_row.addWidget(self._minus_offset_label)
         align_layout.addLayout(minus_off_row)
 
-        # Vocal offset spinner
+        # Vocal offset slider
         vocal_off_row = QHBoxLayout()
         vocal_off_row.addWidget(QLabel("Vocal offset:"))
-        self._vocal_offset_spin = QDoubleSpinBox()
-        self._vocal_offset_spin.setRange(-60000.0, 60000.0)
-        self._vocal_offset_spin.setValue(0.0)
-        self._vocal_offset_spin.setSingleStep(1.0)
-        self._vocal_offset_spin.setDecimals(1)
-        self._vocal_offset_spin.setSuffix(" ms")
-        vocal_off_row.addWidget(self._vocal_offset_spin)
-        vocal_off_row.addStretch()
+        self._vocal_offset_slider = QSlider(Qt.Horizontal)
+        self._vocal_offset_slider.setRange(-60000, 60000)
+        self._vocal_offset_slider.setValue(0)
+        self._vocal_offset_slider.setSingleStep(1)
+        vocal_off_row.addWidget(self._vocal_offset_slider, stretch=1)
+        self._vocal_offset_label = QLabel("0 ms")
+        self._vocal_offset_label.setFixedWidth(70)
+        vocal_off_row.addWidget(self._vocal_offset_label)
         align_layout.addLayout(vocal_off_row)
 
         # Auto-Align button
@@ -237,15 +237,9 @@ class MixPanel(QWidget):
         layout.addWidget(mix_group)
         layout.addStretch()
 
-        # Connect offset spinner signals
-        self._minus_offset_spin.valueChanged.connect(self.minus_offset_changed)
-        self._vocal_offset_spin.valueChanged.connect(self.vocal_offset_changed)
-        self._minus_offset_spin.valueChanged.connect(
-            lambda v: self._update_offset_color(self._minus_offset_spin, v)
-        )
-        self._vocal_offset_spin.valueChanged.connect(
-            lambda v: self._update_offset_color(self._vocal_offset_spin, v)
-        )
+        # Connect offset slider signals
+        self._minus_offset_slider.valueChanged.connect(self._on_minus_offset_slider)
+        self._vocal_offset_slider.valueChanged.connect(self._on_vocal_offset_slider)
 
     # --- Effect row helper ---
 
@@ -305,10 +299,10 @@ class MixPanel(QWidget):
         return float(val) if val > 0 else None
 
     def minus_offset_ms(self) -> float:
-        return self._minus_offset_spin.value()
+        return float(self._minus_offset_slider.value())
 
     def vocal_offset_ms(self) -> float:
-        return self._vocal_offset_spin.value()
+        return float(self._vocal_offset_slider.value())
 
     # --- Effects config ---
 
@@ -389,16 +383,18 @@ class MixPanel(QWidget):
         self._auto_align_btn.setEnabled(enabled)
 
     def set_minus_offset(self, ms: float) -> None:
-        self._minus_offset_spin.blockSignals(True)
-        self._minus_offset_spin.setValue(ms)
-        self._minus_offset_spin.blockSignals(False)
-        self._update_offset_color(self._minus_offset_spin, ms)
+        self._minus_offset_slider.blockSignals(True)
+        self._minus_offset_slider.setValue(int(ms))
+        self._minus_offset_slider.blockSignals(False)
+        self._minus_offset_label.setText(f"{ms:+.0f} ms")
+        self._update_offset_color_slider(self._minus_offset_label, ms)
 
     def set_vocal_offset(self, ms: float) -> None:
-        self._vocal_offset_spin.blockSignals(True)
-        self._vocal_offset_spin.setValue(ms)
-        self._vocal_offset_spin.blockSignals(False)
-        self._update_offset_color(self._vocal_offset_spin, ms)
+        self._vocal_offset_slider.blockSignals(True)
+        self._vocal_offset_slider.setValue(int(ms))
+        self._vocal_offset_slider.blockSignals(False)
+        self._vocal_offset_label.setText(f"{ms:+.0f} ms")
+        self._update_offset_color_slider(self._vocal_offset_label, ms)
 
     def set_apply_effects_enabled(self, enabled: bool) -> None:
         self._apply_effects_btn.setEnabled(enabled)
@@ -409,9 +405,21 @@ class MixPanel(QWidget):
     def set_auto_tune_enabled(self, enabled: bool) -> None:
         self._auto_tune_btn.setEnabled(enabled)
 
+    def _on_minus_offset_slider(self, value: int) -> None:
+        ms = float(value)
+        self._minus_offset_label.setText(f"{ms:+.0f} ms")
+        self._update_offset_color_slider(self._minus_offset_label, value)
+        self.minus_offset_changed.emit(ms)
+
+    def _on_vocal_offset_slider(self, value: int) -> None:
+        ms = float(value)
+        self._vocal_offset_label.setText(f"{ms:+.0f} ms")
+        self._update_offset_color_slider(self._vocal_offset_label, value)
+        self.vocal_offset_changed.emit(ms)
+
     @staticmethod
-    def _update_offset_color(spin: QDoubleSpinBox, value: float) -> None:
-        if abs(value) > 0.05:
-            spin.setStyleSheet("background-color: #2A4A3A;")
+    def _update_offset_color_slider(label: QLabel, value: float) -> None:
+        if abs(value) > 0.5:
+            label.setStyleSheet("color: #4CAF50; font-weight: bold;")
         else:
-            spin.setStyleSheet("")
+            label.setStyleSheet("")

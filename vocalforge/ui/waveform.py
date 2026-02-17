@@ -98,6 +98,9 @@ class WaveformWidget(QWidget):
         self.update()
 
     def mousePressEvent(self, event) -> None:
+        if event.position().y() > self.height() - 6:
+            super().mousePressEvent(event)
+            return
         if self._data is not None and self.width() > 0:
             normalized = max(0.0, min(1.0, event.position().x() / self.width()))
             self.seek_requested.emit(normalized)
