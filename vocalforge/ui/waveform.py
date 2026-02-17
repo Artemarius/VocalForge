@@ -21,7 +21,6 @@ class WaveformWidget(QWidget):
         super().__init__(parent)
         self._data: np.ndarray | None = None
         self._sample_rate: int = 0
-        self._channels: int = 0
         self._envelope: list[tuple[np.ndarray, np.ndarray]] | None = None
         self._cursor_position: float = -1.0  # normalized 0.0–1.0, -1.0 = hidden
         # Offset visualization: place this waveform at a position in a global timeline
@@ -41,7 +40,6 @@ class WaveformWidget(QWidget):
         """
         self._data = data
         self._sample_rate = sample_rate
-        self._channels = 1 if data.ndim == 1 else data.shape[1]
         self._compute_envelope()
         self.update()
 
@@ -79,7 +77,6 @@ class WaveformWidget(QWidget):
         """Reset to blank state."""
         self._data = None
         self._sample_rate = 0
-        self._channels = 0
         self._envelope = None
         self._cursor_position = -1.0
         self._offset_samples = 0
@@ -129,9 +126,10 @@ class WaveformWidget(QWidget):
 
         data = self._data
         if data.ndim == 1:
-            channels = [data]
+            mono = data
         else:
-            channels = [data[:, ch] for ch in range(data.shape[1])]
+            mono = data.mean(axis=1)
+        channels = [mono]
 
         use_global = (
             self._total_duration_samples > 0
@@ -196,37 +194,24 @@ class WaveformWidget(QWidget):
             painter.end()
             return
 
-        n_channels = len(self._envelope)
+        # Always a single mono envelope
+        mins, maxs = self._envelope[0]
         total_height = self.height()
+        center_y = total_height // 2
 
-        for ch_idx, (mins, maxs) in enumerate(self._envelope):
-            if n_channels == 1:
-                y_offset = 0
-                ch_height = total_height
-            else:
-                ch_height = total_height // n_channels
-                y_offset = ch_idx * ch_height
+        # Center line
+        painter.setPen(QPen(_CENTER_COLOR, 1))
+        painter.drawLine(0, center_y, self.width(), center_y)
 
-            center_y = y_offset + ch_height // 2
-
-            # Center line
-            painter.setPen(QPen(_CENTER_COLOR, 1))
-            painter.drawLine(0, center_y, self.width(), center_y)
-
-            # Separator between channels
-            if n_channels > 1 and ch_idx > 0:
-                painter.setPen(QPen(_SEPARATOR_COLOR, 1))
-                painter.drawLine(0, y_offset, self.width(), y_offset)
-
-            # Waveform (scaled by display gain)
-            painter.setPen(QPen(_WAVE_COLOR, 1))
-            half_height = ch_height / 2.0
-            g = self._display_gain
-            n_cols = len(mins)
-            for x in range(n_cols):
-                y_min = int(center_y - maxs[x] * g * half_height)
-                y_max = int(center_y - mins[x] * g * half_height)
-                painter.drawLine(x, y_min, x, y_max)
+        # Waveform (scaled by display gain)
+        painter.setPen(QPen(_WAVE_COLOR, 1))
+        half_height = total_height / 2.0
+        g = self._display_gain
+        n_cols = len(mins)
+        for x in range(n_cols):
+            y_min = int(center_y - maxs[x] * g * half_height)
+            y_max = int(center_y - mins[x] * g * half_height)
+            painter.drawLine(x, y_min, x, y_max)
 
         # Playback cursor
         if self._cursor_position >= 0:

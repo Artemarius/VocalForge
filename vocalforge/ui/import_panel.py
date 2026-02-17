@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -62,7 +63,19 @@ class ImportPanel(QWidget):
         self._vol_sliders: dict[str, QSlider] = {}
         self._vol_labels: dict[str, QLabel] = {}
 
-        layout = QVBoxLayout(self)
+        # Outer layout with scroll area
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        outer_layout.addWidget(scroll)
+
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        scroll.setWidget(inner)
 
         # --- Source group ---
         layout.addWidget(
@@ -382,6 +395,25 @@ class ImportPanel(QWidget):
             "vocal_processed", data, sample_rate, path, "Processed vocal",
             normalize=True,
         )
+
+    def clear_slot(self, slot_name: str) -> None:
+        """Reset a track slot to empty state (data, path, waveform, labels, volume)."""
+        if slot_name not in _SLOT_NAMES:
+            return
+        if self._tracks[slot_name] is None:
+            return  # already empty
+        self._tracks[slot_name] = None
+        self._paths[slot_name] = None
+        self._file_labels[slot_name].setText(
+            "No file loaded" if slot_name in ("song", "minus_import", "vocal")
+            else "\u2014"
+        )
+        self._info_labels[slot_name].setText("")
+        self._waveforms[slot_name].clear()
+        slider = self._vol_sliders.get(slot_name)
+        if slider:
+            slider.setValue(100)
+        self.track_loaded.emit(slot_name)
 
     # --- Volume fader access ---
 

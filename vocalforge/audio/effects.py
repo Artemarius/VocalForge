@@ -259,4 +259,8 @@ def process_vocal(data: np.ndarray, sr: int, config: dict | None = None) -> np.n
         params = {k: v for k, v in effect_cfg.items() if k not in ("enabled", "stub")}
         result = func(result, sr, **params)
 
+    # Final NaN/inf sanitization (guards against broken effect outputs)
+    if not np.all(np.isfinite(result)):
+        result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+
     return result

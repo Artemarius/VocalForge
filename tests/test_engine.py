@@ -350,3 +350,166 @@ class TestOnPlaybackFinished:
         engine._on_playback_finished()
         assert engine.playback_ended is True
         assert engine.state == EngineState.IDLE
+
+
+# ---- Multi-track tests ----
+
+
+class TestLoadMultiTotalFrames:
+    """Verify total_frames = max(track_length + offset) across tracks."""
+
+    def test_same_length_no_offsets(self, engine):
+        sr = 44100
+        t1 = np.zeros(1000, dtype=np.float32)
+        t2 = np.zeros(2000, dtype=np.float32)
+        engine.load_multi([t1, t2], sr)
+        assert engine.total_frames == 2000
+
+    def test_offset_extends_total(self, engine):
+        sr = 44100
+        t1 = np.zeros(1000, dtype=np.float32)
+        t2 = np.zeros(1000, dtype=np.float32)
+        engine.load_multi([t1, t2], sr, offsets=[0, 500])
+        # t2 ends at 500 + 1000 = 1500
+        assert engine.total_frames == 1500
+
+    def test_shorter_track_with_large_offset(self, engine):
+        sr = 44100
+        t1 = np.zeros(3000, dtype=np.float32)
+        t2 = np.zeros(500, dtype=np.float32)
+        engine.load_multi([t1, t2], sr, offsets=[0, 4000])
+        # t2 ends at 4000 + 500 = 4500 > 3000
+        assert engine.total_frames == 4500
+
+
+class TestLoadMultiWithMutes:
+    """Verify muted tracks don't produce audio but total_frames includes them."""
+
+    def test_muted_tracks_still_count_in_total_frames(self, engine):
+        sr = 44100
+        t1 = np.zeros(1000, dtype=np.float32)
+        t2 = np.zeros(2000, dtype=np.float32)
+        engine.load_multi([t1, t2], sr, mutes=[False, True])
+        # t2 is muted but still counts for total_frames
+        assert engine.total_frames == 2000
+
+    def test_muted_track_produces_silence(self, engine):
+        sr = 44100
+        t1 = np.ones(1024, dtype=np.float32) * 0.5
+        engine.load_multi([t1], sr, mutes=[True])
+
+        frames = 512
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._position = 0
+        engine._multi_playback_callback(outdata, frames, None, None)
+        assert np.all(outdata == 0)
+
+    def test_unmuted_track_produces_audio(self, engine):
+        sr = 44100
+        t1 = np.ones(1024, dtype=np.float32) * 0.5
+        engine.load_multi([t1], sr, mutes=[False])
+
+        frames = 512
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._position = 0
+        engine._multi_playback_callback(outdata, frames, None, None)
+        # Mono track duplicated to both channels
+        np.testing.assert_array_almost_equal(outdata[:, 0], 0.5)
+        np.testing.assert_array_almost_equal(outdata[:, 1], 0.5)
+
+
+class TestMultiTrackSeek:
+    """Verify seek is respected in multi-track mode."""
+
+    def test_seek_sets_position(self, engine):
+        sr = 44100
+        t1 = np.zeros(4000, dtype=np.float32)
+        engine.load_multi([t1], sr)
+        engine.seek(2000)
+        assert engine.position == 2000
+
+    def test_seek_clamped_to_total(self, engine):
+        sr = 44100
+        t1 = np.zeros(1000, dtype=np.float32)
+        engine.load_multi([t1], sr)
+        engine.seek(9999)
+        assert engine.position == 1000
+
+    def test_seek_affects_callback_output(self, engine):
+        sr = 44100
+        # Ramp signal: each sample = its index
+        t1 = np.arange(2048, dtype=np.float32)
+        engine.load_multi([t1], sr)
+        engine.seek(1000)
+
+        frames = 512
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._multi_playback_callback(outdata, frames, None, None)
+        # Output should be samples 1000..1511
+        expected = np.arange(1000, 1512, dtype=np.float32)
+        np.testing.assert_array_almost_equal(outdata[:, 0], expected)
+
+
+class TestMultiTrackCallback:
+    """Verify offset logic in multi-track callback."""
+
+    def test_offset_track_silent_before_offset(self, engine):
+        sr = 44100
+        t1 = np.ones(1000, dtype=np.float32) * 0.8
+        engine.load_multi([t1], sr, offsets=[500])
+        engine._position = 0
+
+        # Read first 500 frames — track hasn't started yet
+        frames = 500
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._multi_playback_callback(outdata, frames, None, None)
+        assert np.all(outdata == 0)
+
+    def test_offset_track_audible_after_offset(self, engine):
+        sr = 44100
+        t1 = np.ones(1000, dtype=np.float32) * 0.8
+        engine.load_multi([t1], sr, offsets=[500])
+
+        # Seek past offset and read
+        engine._position = 500
+        frames = 256
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._multi_playback_callback(outdata, frames, None, None)
+        np.testing.assert_array_almost_equal(outdata[:, 0], 0.8)
+
+    def test_two_tracks_summed(self, engine):
+        sr = 44100
+        t1 = np.ones(1024, dtype=np.float32) * 0.3
+        t2 = np.ones(1024, dtype=np.float32) * 0.2
+        engine.load_multi([t1, t2], sr)
+        engine._position = 0
+
+        frames = 512
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._multi_playback_callback(outdata, frames, None, None)
+        np.testing.assert_array_almost_equal(outdata[:, 0], 0.5)
+
+    def test_gain_applied(self, engine):
+        sr = 44100
+        t1 = np.ones(1024, dtype=np.float32) * 1.0
+        engine.load_multi([t1], sr, gains=[0.5])
+        engine._position = 0
+
+        frames = 512
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._multi_playback_callback(outdata, frames, None, None)
+        np.testing.assert_array_almost_equal(outdata[:, 0], 0.5)
+
+    def test_stereo_track(self, engine):
+        sr = 44100
+        left = np.ones(1024, dtype=np.float32) * 0.3
+        right = np.ones(1024, dtype=np.float32) * 0.7
+        stereo = np.column_stack([left, right]).astype(np.float32)
+        engine.load_multi([stereo], sr)
+        engine._position = 0
+
+        frames = 512
+        outdata = np.zeros((frames, 2), dtype=np.float32)
+        engine._multi_playback_callback(outdata, frames, None, None)
+        np.testing.assert_array_almost_equal(outdata[:, 0], 0.3)
+        np.testing.assert_array_almost_equal(outdata[:, 1], 0.7)

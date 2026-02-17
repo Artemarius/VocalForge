@@ -1,6 +1,7 @@
 """Mix panel — effects chain controls, alignment, and export."""
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -11,9 +12,40 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QStyle,
+    QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
+
+
+class _JumpSlider(QSlider):
+    """QSlider that jumps to the clicked position instead of page-stepping."""
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            groove = self.style().subControlRect(
+                QStyle.ComplexControl.CC_Slider, opt,
+                QStyle.SubControl.SC_SliderGroove, self,
+            )
+            if self.orientation() == Qt.Orientation.Horizontal:
+                pos = event.position().x()
+                val = QStyle.sliderValueFromPosition(
+                    self.minimum(), self.maximum(),
+                    int(pos - groove.x()), groove.width(),
+                )
+            else:
+                pos = event.position().y()
+                val = QStyle.sliderValueFromPosition(
+                    self.minimum(), self.maximum(),
+                    int(pos - groove.y()), groove.height(),
+                    upsideDown=True,
+                )
+            self.setValue(val)
+        super().mousePressEvent(event)
+
 
 # Effect display definitions: (config_key, label, stub, controls_factory)
 # controls_factory returns (widget_list, value_getter_name) or None for stubs.
@@ -53,34 +85,49 @@ class MixPanel(QWidget):
         # Minus offset slider
         minus_off_row = QHBoxLayout()
         minus_off_row.addWidget(QLabel("Minus offset:"))
-        self._minus_offset_slider = QSlider(Qt.Horizontal)
-        self._minus_offset_slider.setRange(-60000, 60000)
+        self._minus_offset_slider = _JumpSlider(Qt.Horizontal)
+        self._minus_offset_slider.setRange(-30000, 30000)
         self._minus_offset_slider.setValue(0)
         self._minus_offset_slider.setSingleStep(1)
+        self._minus_offset_slider.setPageStep(100)
         minus_off_row.addWidget(self._minus_offset_slider, stretch=1)
         self._minus_offset_label = QLabel("0 ms")
         self._minus_offset_label.setFixedWidth(70)
         minus_off_row.addWidget(self._minus_offset_label)
+        self._minus_reset_btn = QPushButton("\u21BA")
+        self._minus_reset_btn.setFixedSize(24, 24)
+        self._minus_reset_btn.setToolTip("Reset minus offset to 0")
+        self._minus_reset_btn.clicked.connect(self._on_reset_minus_offset)
+        minus_off_row.addWidget(self._minus_reset_btn)
         align_layout.addLayout(minus_off_row)
 
         # Vocal offset slider
         vocal_off_row = QHBoxLayout()
         vocal_off_row.addWidget(QLabel("Vocal offset:"))
-        self._vocal_offset_slider = QSlider(Qt.Horizontal)
-        self._vocal_offset_slider.setRange(-60000, 60000)
+        self._vocal_offset_slider = _JumpSlider(Qt.Horizontal)
+        self._vocal_offset_slider.setRange(-30000, 30000)
         self._vocal_offset_slider.setValue(0)
         self._vocal_offset_slider.setSingleStep(1)
+        self._vocal_offset_slider.setPageStep(100)
         vocal_off_row.addWidget(self._vocal_offset_slider, stretch=1)
         self._vocal_offset_label = QLabel("0 ms")
         self._vocal_offset_label.setFixedWidth(70)
         vocal_off_row.addWidget(self._vocal_offset_label)
+        self._vocal_reset_btn = QPushButton("\u21BA")
+        self._vocal_reset_btn.setFixedSize(24, 24)
+        self._vocal_reset_btn.setToolTip("Reset vocal offset to 0")
+        self._vocal_reset_btn.clicked.connect(self._on_reset_vocal_offset)
+        vocal_off_row.addWidget(self._vocal_reset_btn)
         align_layout.addLayout(vocal_off_row)
 
         # Auto-Align button
+        align_btn_row = QHBoxLayout()
         self._auto_align_btn = QPushButton("Auto-Align")
         self._auto_align_btn.setEnabled(False)
         self._auto_align_btn.clicked.connect(self.auto_align_clicked)
-        align_layout.addWidget(self._auto_align_btn)
+        align_btn_row.addWidget(self._auto_align_btn)
+
+        align_layout.addLayout(align_btn_row)
 
         # Confidence / info label
         self._alignment_label = QLabel("Offset: not yet computed")
@@ -237,9 +284,18 @@ class MixPanel(QWidget):
         layout.addWidget(mix_group)
         layout.addStretch()
 
-        # Connect offset slider signals
-        self._minus_offset_slider.valueChanged.connect(self._on_minus_offset_slider)
-        self._vocal_offset_slider.valueChanged.connect(self._on_vocal_offset_slider)
+        # Connect offset slider signals:
+        # valueChanged → label update only (during drag)
+        # sliderReleased → emit change signal (triggers processing)
+        self._minus_offset_slider.valueChanged.connect(self._on_minus_offset_label_update)
+        self._minus_offset_slider.sliderReleased.connect(self._on_minus_offset_released)
+        self._vocal_offset_slider.valueChanged.connect(self._on_vocal_offset_label_update)
+        self._vocal_offset_slider.sliderReleased.connect(self._on_vocal_offset_released)
+
+        # Connect Max Offset spinner to update slider ranges dynamically
+        self._max_offset_spin.valueChanged.connect(self._on_max_offset_changed)
+        # Set initial slider range from default Max Offset value
+        self._on_max_offset_changed(self._max_offset_spin.value())
 
     # --- Effect row helper ---
 
@@ -405,17 +461,41 @@ class MixPanel(QWidget):
     def set_auto_tune_enabled(self, enabled: bool) -> None:
         self._auto_tune_btn.setEnabled(enabled)
 
-    def _on_minus_offset_slider(self, value: int) -> None:
+    def _on_minus_offset_label_update(self, value: int) -> None:
+        """Update label during drag (no processing)."""
         ms = float(value)
         self._minus_offset_label.setText(f"{ms:+.0f} ms")
         self._update_offset_color_slider(self._minus_offset_label, value)
-        self.minus_offset_changed.emit(ms)
 
-    def _on_vocal_offset_slider(self, value: int) -> None:
+    def _on_minus_offset_released(self) -> None:
+        """Emit change signal when slider is released (triggers processing)."""
+        self.minus_offset_changed.emit(float(self._minus_offset_slider.value()))
+
+    def _on_vocal_offset_label_update(self, value: int) -> None:
+        """Update label during drag (no processing)."""
         ms = float(value)
         self._vocal_offset_label.setText(f"{ms:+.0f} ms")
         self._update_offset_color_slider(self._vocal_offset_label, value)
-        self.vocal_offset_changed.emit(ms)
+
+    def _on_vocal_offset_released(self) -> None:
+        """Emit change signal when slider is released (triggers processing)."""
+        self.vocal_offset_changed.emit(float(self._vocal_offset_slider.value()))
+
+    def _on_max_offset_changed(self, value: int) -> None:
+        """Update offset slider ranges when Max Offset spinner changes."""
+        max_ms = value * 1000 if value > 0 else 60000
+        self._minus_offset_slider.setRange(-max_ms, max_ms)
+        self._vocal_offset_slider.setRange(-max_ms, max_ms)
+
+    def _on_reset_minus_offset(self) -> None:
+        """Reset minus offset slider to 0 and emit signal."""
+        self.set_minus_offset(0.0)
+        self.minus_offset_changed.emit(0.0)
+
+    def _on_reset_vocal_offset(self) -> None:
+        """Reset vocal offset slider to 0 and emit signal."""
+        self.set_vocal_offset(0.0)
+        self.vocal_offset_changed.emit(0.0)
 
     @staticmethod
     def _update_offset_color_slider(label: QLabel, value: float) -> None:

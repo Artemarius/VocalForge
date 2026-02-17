@@ -217,4 +217,9 @@ def reduce_noise(
     if not is_mono:
         reduced = reduced.T
 
+    # Sanitize NaN/inf from noisereduce (can occur when noise profile
+    # has near-zero frequency bins, causing divide-by-zero)
+    if not np.all(np.isfinite(reduced)):
+        reduced = np.nan_to_num(reduced, nan=0.0, posinf=0.0, neginf=0.0)
+
     return reduced.astype(np.float32)

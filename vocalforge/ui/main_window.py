@@ -180,6 +180,13 @@ class _MixWorker(QThread):
         self._manual_minus_offset = manual_minus_offset_samples
         self._manual_vocal_offset = manual_vocal_offset_samples
 
+    @staticmethod
+    def _peak(data: np.ndarray) -> float:
+        """Return peak absolute amplitude of audio array."""
+        if data.size == 0:
+            return 0.0
+        return float(np.max(np.abs(data)))
+
     def run(self) -> None:
         try:
             sr = self._minus_sr
@@ -203,6 +210,11 @@ class _MixWorker(QThread):
             align_info = {"lag_samples": 0, "lag_ms": 0.0}
             minus_for_mix = self._minus_data
 
+            self.progress.emit(
+                f"Input: minus {self._minus_data.shape} peak={self._peak(self._minus_data):.3f}, "
+                f"vocal {vocal.shape} peak={self._peak(vocal):.3f}"
+            )
+
             # Check for manual offsets
             has_manual = (
                 self._manual_vocal_offset is not None
@@ -210,9 +222,11 @@ class _MixWorker(QThread):
             )
 
             if has_manual:
-                self.progress.emit("Applying manual offsets...")
                 vocal_offset = self._manual_vocal_offset or 0
                 minus_offset = self._manual_minus_offset or 0
+                self.progress.emit(
+                    f"Manual offsets: vocal={vocal_offset}, minus={minus_offset}"
+                )
                 aligned_vocal = shift_track(vocal, vocal_offset, target_len)
                 if minus_offset != 0:
                     minus_for_mix = shift_track(
@@ -260,6 +274,11 @@ class _MixWorker(QThread):
                     max_offset_s=self._max_offset_s,
                 )
 
+            self.progress.emit(
+                f"After align: vocal peak={self._peak(aligned_vocal):.3f}, "
+                f"minus peak={self._peak(minus_for_mix):.3f}"
+            )
+
             # Apply vocal effects chain
             self.progress.emit("Processing vocal effects...")
             effects_cfg = self._effects_config or {}
@@ -273,6 +292,10 @@ class _MixWorker(QThread):
             effects_cfg_vocal["limiter"] = {"enabled": False}
             aligned_vocal = process_vocal(aligned_vocal, sr, config=effects_cfg_vocal)
 
+            self.progress.emit(
+                f"After FX: vocal peak={self._peak(aligned_vocal):.3f}"
+            )
+
             # Mix (without built-in peak limiter — we use effects.limiter)
             self.progress.emit("Mixing...")
             mix_data, mix_info = mix_tracks(
@@ -285,6 +308,11 @@ class _MixWorker(QThread):
                 apply_limiter=False,
             )
 
+            self.progress.emit(
+                f"After mix: peak={self._peak(mix_data):.3f}, "
+                f"LUFS={mix_info.get('mix_lufs', '?')}"
+            )
+
             # Apply limiter to the final mix
             limiter_cfg = effects_cfg.get("limiter", {})
             if limiter_cfg.get("enabled", True):
@@ -295,7 +323,9 @@ class _MixWorker(QThread):
                 )
 
             # Save
-            self.progress.emit("Saving...")
+            self.progress.emit(
+                f"Saving ({mix_data.shape}, peak={self._peak(mix_data):.3f})..."
+            )
             save_audio(self._output_path, mix_data, sr)
 
             result = {**align_info, **mix_info, "output_path": self._output_path}
@@ -430,6 +460,9 @@ class MainWindow(QMainWindow):
         self._minus_offset_samples: int = 0
         self._vocal_offset_samples: int = 0
 
+        # Waveform total frames (includes offsets — may differ from engine total)
+        self._waveform_total_frames: int = 0
+
         # Worker references (prevent GC while running)
         self._mix_worker: _MixWorker | None = None
         self._separation_worker: _SeparationWorker | None = None
@@ -486,17 +519,42 @@ class MainWindow(QMainWindow):
     # --- Track loading ---
 
     def _on_track_loaded(self, slot_name: str) -> None:
-        # Enable record when any minus track is loaded
+        track = self._get_track(slot_name)
+
+        # Handle cleared tracks: reset offsets and stale state
+        if track is None:
+            if slot_name == "minus_import":
+                self._minus_offset_samples = 0
+                self._mix_panel.set_minus_offset(0.0)
+            elif slot_name == "vocal":
+                self._vocal_offset_samples = 0
+                self._mix_panel.set_vocal_offset(0.0)
+                # Clear stale processed vocal
+                self._import_panel.clear_slot("vocal_processed")
+            elif slot_name == "song":
+                self._vocals_stem_path = None
+        else:
+            # Auto-check the mute checkbox only when a track is loaded (not cleared)
+            self._record_panel.set_mute_checked(slot_name, True)
+
+            # Clear stale downstream slots on new source load
+            if slot_name == "vocal":
+                self._import_panel.clear_slot("vocal_processed")
+            elif slot_name == "song":
+                self._vocals_stem_path = None
+
+        # Always recompute waveform offsets (keeps _waveform_total_frames in sync)
+        self._update_waveform_offsets()
+
+        # Enable record only if a minus track actually exists
         if slot_name in ("minus_sep", "minus_import"):
-            self._record_panel.set_record_enabled(True)
+            has_minus = self._import_panel.minus_track is not None
+            self._record_panel.set_record_enabled(has_minus)
 
         # Enable auto-align when we have minus + vocal
         self._update_auto_align_ready()
         self._update_effects_ready()
         self._update_auto_tune_ready()
-
-        # Auto-check the mute checkbox for the loaded track
-        self._record_panel.set_mute_checked(slot_name, True)
 
         # Rebuild multi-track playback
         self._update_multi_playback()
@@ -678,6 +736,7 @@ class MainWindow(QMainWindow):
             if end > total:
                 total = end
 
+        self._waveform_total_frames = total
         self._import_panel.apply_waveform_offsets(offsets, total)
 
     # --- Multi-track playback ---
@@ -686,12 +745,12 @@ class MainWindow(QMainWindow):
         self._update_multi_playback()
 
     def _update_multi_playback(self) -> None:
-        """Gather audible tracks and load into engine for multi-track playback."""
-        mute_states = self._record_panel.get_mute_states()
-        audible_slots = [name for name, audible in mute_states.items() if audible]
+        """Load ALL tracks into engine, using mute flags for audibility.
 
-        if not audible_slots:
-            return
+        This keeps engine.total_frames constant regardless of which tracks
+        are muted, preventing seek/cursor misalignment when toggling mutes.
+        """
+        mute_states = self._record_panel.get_mute_states()
 
         # Determine common sample rate from first available track
         target_sr = None
@@ -713,7 +772,7 @@ class MainWindow(QMainWindow):
         gains = []
         mutes = []
 
-        for slot in audible_slots:
+        for slot in _SLOT_NAMES:
             track = self._get_track(slot)
             if track is None:
                 continue
@@ -732,10 +791,11 @@ class MainWindow(QMainWindow):
                 off = max_lag
 
             gain = self._import_panel.get_track_gain(slot)
+            is_muted = not mute_states.get(slot, False)
             tracks.append(data)
             offsets.append(off)
             gains.append(gain)
-            mutes.append(False)
+            mutes.append(is_muted)
 
         if not tracks:
             return
@@ -770,8 +830,8 @@ class MainWindow(QMainWindow):
         if minus is None or vocal is None:
             return
 
-        minus_data, minus_sr = minus
-        vocal_data, vocal_sr = vocal
+        minus_data, minus_sr = minus[0].copy(), minus[1]
+        vocal_data, vocal_sr = vocal[0].copy(), vocal[1]
 
         # Choose output path
         default_dir = ""
@@ -813,15 +873,15 @@ class MainWindow(QMainWindow):
                 self._mix_panel.set_mix_enabled(True)
                 return
 
-        # Gather separated stem data for chain alignment and NR
+        # Gather separated stem data for chain alignment and NR (defensive copy)
         minus_sep_data = minus_sep_sr = None
         vocal_sep_data = vocal_sep_sr = None
         sep = self._import_panel.minus_sep_track
         if sep is not None:
-            minus_sep_data, minus_sep_sr = sep
+            minus_sep_data, minus_sep_sr = sep[0].copy(), sep[1]
         sep = self._import_panel.vocal_sep_track
         if sep is not None:
-            vocal_sep_data, vocal_sep_sr = sep
+            vocal_sep_data, vocal_sep_sr = sep[0].copy(), sep[1]
 
         # Build effects config from UI
         effects_config = self._mix_panel.get_effects_config()
@@ -863,8 +923,14 @@ class MainWindow(QMainWindow):
         lag_ms = result.get("lag_ms", 0.0)
         lag_samples = result.get("lag_samples", 0)
         self._mix_panel.set_alignment_info(lag_ms, lag_samples)
+
+        # Show detailed mix info in status
+        vocal_lufs = result.get("vocal_lufs", float("nan"))
+        minus_lufs = result.get("minus_lufs", float("nan"))
+        mix_lufs = result.get("mix_lufs", float("nan"))
         self._mix_panel.set_status(
-            f"Done — saved to {os.path.basename(result['output_path'])}"
+            f"Done — {os.path.basename(result['output_path'])} | "
+            f"V:{vocal_lufs:.1f} M:{minus_lufs:.1f} Mix:{mix_lufs:.1f} LUFS"
         )
 
         # Check for suspicious alignment
@@ -880,9 +946,20 @@ class MainWindow(QMainWindow):
         try:
             from vocalforge.utils.audio_io import load_audio
             mix_data, mix_sr = load_audio(output_path)
+            # Validate loaded data
+            if mix_data.size == 0:
+                raise ValueError("Mix file is empty")
+            peak = float(np.max(np.abs(mix_data)))
+            if peak < 1e-6:
+                raise ValueError(
+                    f"Mix file has near-zero amplitude (peak={peak:.2e})"
+                )
             self._import_panel.set_mix_result_track(mix_data, mix_sr, output_path)
-        except Exception:
-            pass  # non-critical — user can still find the file on disk
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Mix Result",
+                f"Mix exported successfully but could not load for preview:\n{exc}",
+            )
 
         self._mix_panel.set_mix_enabled(True)
         self._mix_worker = None
@@ -965,16 +1042,23 @@ class MainWindow(QMainWindow):
         """Handle seek from slider or waveform click."""
         if self._engine.is_recording:
             return
-        total = self._engine.total_frames
-        if total == 0:
+        engine_total = self._engine.total_frames
+        if engine_total == 0:
             return
-        frame = int(normalized * total)
+
+        # Use waveform total for cursor positioning (includes offsets)
+        wf_total = self._waveform_total_frames or engine_total
+        frame = int(normalized * wf_total)
+        # Clamp to engine range so we don't seek past actual audio
+        frame = max(0, min(frame, engine_total - 1))
         self._engine.seek(frame)
         sr = self._engine.sample_rate
-        self._record_panel.update_time_display(frame / sr, total / sr)
-        self._record_panel.update_seek_slider(normalized)
+        self._record_panel.update_time_display(frame / sr, wf_total / sr)
+        self._record_panel.update_seek_slider(
+            frame / wf_total if wf_total > 0 else 0
+        )
         # Update all waveform cursors
-        self._import_panel.set_all_cursors(frame, sr, total_duration=total)
+        self._import_panel.set_all_cursors(frame, sr, total_duration=wf_total)
 
     # --- Playback controls ---
 
@@ -1085,13 +1169,16 @@ class MainWindow(QMainWindow):
 
         pos = self._engine.position
         sr = self._engine.sample_rate
-        normalized = pos / total
+
+        # Use waveform total for cursor positioning (includes offsets)
+        wf_total = self._waveform_total_frames or total
+        normalized = pos / wf_total
 
         # Update ALL waveform cursors (global timeline)
-        self._import_panel.set_all_cursors(pos, sr, total_duration=total)
+        self._import_panel.set_all_cursors(pos, sr, total_duration=wf_total)
 
         # Update time display and seek slider
-        self._record_panel.update_time_display(pos / sr, total / sr)
+        self._record_panel.update_time_display(pos / sr, wf_total / sr)
         self._record_panel.update_seek_slider(normalized)
 
         # Detect natural end of playback
@@ -1113,16 +1200,16 @@ class MainWindow(QMainWindow):
         if vocal is None:
             return
 
-        vocal_data, vocal_sr = vocal
+        vocal_data, vocal_sr = vocal[0].copy(), vocal[1]
 
         self._mix_panel.set_apply_effects_enabled(False)
         self._mix_panel.set_effects_status("Processing...")
 
-        # Gather vocal separation stem for NR guide
+        # Gather vocal separation stem for NR guide (defensive copy)
         vocal_sep_data = vocal_sep_sr = None
         sep = self._import_panel.vocal_sep_track
         if sep is not None:
-            vocal_sep_data, vocal_sep_sr = sep
+            vocal_sep_data, vocal_sep_sr = sep[0].copy(), sep[1]
 
         effects_config = self._mix_panel.get_effects_config()
 
