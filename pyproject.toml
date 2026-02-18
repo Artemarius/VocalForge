@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vocalforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Desktop app for recording vocals over music tracks with automatic alignment, normalization, and mixing"
 readme = "README.md"
 license = "MIT"
