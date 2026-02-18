@@ -7,8 +7,8 @@ float32 array. The chain order follows VOCAL_ENHANCEMENT.md:
     2. Spectral NR       (wraps noise_reduction.reduce_noise)
     3. De-reverb         (spectral subtraction via transient detection)
     4. High-Pass Filter  (wraps noise_reduction.high_pass_filter)
-    5. Parametric EQ     (stub)
-    6. Compressor        (stub)
+    5. Parametric EQ     (biquad cascaded EQ with presets)
+    6. Compressor        (RMS envelope, soft-knee, auto makeup)
     7. De-Esser          (stub)
     8. Reverb            (stub)
     9. Limiter           (real — brick-wall peak limiter)
@@ -60,11 +60,20 @@ DEFAULT_CONFIG = {
     },
     "parametric_eq": {
         "enabled": False,
-        "stub": True,
+        "stub": False,
+        "preset": "clean_up",
+        "bands": None,  # filled from EQ_PRESETS at import time (see below)
     },
     "compressor": {
         "enabled": False,
-        "stub": True,
+        "stub": False,
+        "threshold_db": -18.0,
+        "ratio": 3.0,
+        "attack_ms": 15.0,
+        "release_ms": 200.0,
+        "knee_db": 6.0,
+        "makeup_db": None,
+        "mix": 1.0,
     },
     "de_esser": {
         "enabled": False,
@@ -103,13 +112,37 @@ PRESET_CONFIGS = {
         "spectral_noise_reduction": {"enabled": True, "strength": 0.75},
         "dereverb": {"enabled": True, "strength": 0.5},
         "highpass_filter": {"enabled": True, "cutoff_hz": 80.0},
-        "parametric_eq": {"enabled": False},
-        "compressor": {"enabled": False},
+        "parametric_eq": {"enabled": True, "preset": "clean_up"},
+        "compressor": {"enabled": True, "threshold_db": -18.0, "ratio": 3.0},
         "de_esser": {"enabled": False},
         "reverb": {"enabled": False},
         "limiter": {"enabled": True, "ceiling_db": -1.0},
     },
 }
+
+
+# --- EQ presets ---
+
+EQ_PRESETS = {
+    "clean_up": [
+        {"freq_hz": 250.0, "gain_db": -2.5, "q": 1.5, "type": "peak"},
+        {"freq_hz": 3500.0, "gain_db": 1.5, "q": 1.2, "type": "peak"},
+        {"freq_hz": 10000.0, "gain_db": 1.0, "q": 0.7, "type": "high_shelf"},
+    ],
+    "warm": [
+        {"freq_hz": 200.0, "gain_db": 1.5, "q": 0.7, "type": "low_shelf"},
+        {"freq_hz": 800.0, "gain_db": -2.0, "q": 1.5, "type": "peak"},
+        {"freq_hz": 4000.0, "gain_db": 1.0, "q": 1.2, "type": "peak"},
+    ],
+    "bright": [
+        {"freq_hz": 300.0, "gain_db": -3.0, "q": 1.5, "type": "peak"},
+        {"freq_hz": 3000.0, "gain_db": 2.5, "q": 1.2, "type": "peak"},
+        {"freq_hz": 8000.0, "gain_db": 2.0, "q": 0.7, "type": "high_shelf"},
+    ],
+}
+
+# Patch DEFAULT_CONFIG with actual EQ bands now that EQ_PRESETS is defined
+DEFAULT_CONFIG["parametric_eq"]["bands"] = EQ_PRESETS["clean_up"]
 
 
 def _merge_config(defaults: dict, overrides: dict | None) -> dict:
@@ -338,14 +371,224 @@ def highpass_filter(data: np.ndarray, sr: int, **params) -> np.ndarray:
     return _hpf(data, sr, cutoff_hz=cutoff_hz)
 
 
+def _biquad_peak(freq_hz: float, gain_db: float, q: float, sr: int) -> np.ndarray:
+    """Audio EQ Cookbook peaking EQ filter → SOS row shape (1, 6)."""
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * np.pi * freq_hz / sr
+    alpha = np.sin(w0) / (2.0 * q)
+
+    b0 = 1.0 + alpha * A
+    b1 = -2.0 * np.cos(w0)
+    b2 = 1.0 - alpha * A
+    a0 = 1.0 + alpha / A
+    a1 = -2.0 * np.cos(w0)
+    a2 = 1.0 - alpha / A
+
+    return np.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]])
+
+
+def _biquad_shelf(freq_hz: float, gain_db: float, q: float, sr: int,
+                  shelf_type: str) -> np.ndarray:
+    """Audio EQ Cookbook low/high shelf filter → SOS row shape (1, 6)."""
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * np.pi * freq_hz / sr
+    cos_w0 = np.cos(w0)
+    sin_w0 = np.sin(w0)
+    alpha = sin_w0 / (2.0 * q)
+    two_sqrt_A_alpha = 2.0 * np.sqrt(A) * alpha
+
+    if shelf_type == "low_shelf":
+        b0 = A * ((A + 1) - (A - 1) * cos_w0 + two_sqrt_A_alpha)
+        b1 = 2.0 * A * ((A - 1) - (A + 1) * cos_w0)
+        b2 = A * ((A + 1) - (A - 1) * cos_w0 - two_sqrt_A_alpha)
+        a0 = (A + 1) + (A - 1) * cos_w0 + two_sqrt_A_alpha
+        a1 = -2.0 * ((A - 1) + (A + 1) * cos_w0)
+        a2 = (A + 1) + (A - 1) * cos_w0 - two_sqrt_A_alpha
+    else:  # high_shelf
+        b0 = A * ((A + 1) + (A - 1) * cos_w0 + two_sqrt_A_alpha)
+        b1 = -2.0 * A * ((A - 1) + (A + 1) * cos_w0)
+        b2 = A * ((A + 1) + (A - 1) * cos_w0 - two_sqrt_A_alpha)
+        a0 = (A + 1) - (A - 1) * cos_w0 + two_sqrt_A_alpha
+        a1 = 2.0 * ((A - 1) - (A + 1) * cos_w0)
+        a2 = (A + 1) - (A - 1) * cos_w0 - two_sqrt_A_alpha
+
+    return np.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]])
+
+
 def parametric_eq(data: np.ndarray, sr: int, **params) -> np.ndarray:
-    """Parametric EQ (stub — pass-through)."""
-    return data
+    """Parametric EQ — cascaded biquad filters with zero-phase filtering.
+
+    Builds a second-order sections (SOS) array from all active bands and
+    applies them via ``scipy.signal.sosfiltfilt`` for zero-phase response.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        bands: List of band dicts with keys freq_hz, gain_db, q, type.
+        preset: Name of the active preset (informational, not used by DSP).
+
+    Returns:
+        EQ'd audio, same shape and dtype as input.
+    """
+    bands = params.get("bands", [])
+
+    if data.size == 0 or not bands:
+        return data
+
+    # Build cascaded SOS array from all active bands
+    sos_sections = []
+    for band in bands:
+        gain_db = band.get("gain_db", 0.0)
+        if gain_db == 0.0:
+            continue
+        freq_hz = band["freq_hz"]
+        q = band.get("q", 1.0)
+        band_type = band.get("type", "peak")
+
+        if band_type == "peak":
+            sos_sections.append(_biquad_peak(freq_hz, gain_db, q, sr))
+        elif band_type in ("low_shelf", "high_shelf"):
+            sos_sections.append(_biquad_shelf(freq_hz, gain_db, q, sr, band_type))
+
+    if not sos_sections:
+        return data
+
+    from scipy.signal import sosfiltfilt
+
+    sos = np.vstack(sos_sections)
+
+    if data.ndim == 1:
+        return sosfiltfilt(sos, data).astype(np.float32)
+
+    # Stereo: filter each channel independently
+    channels = []
+    for ch in range(data.shape[1]):
+        channels.append(sosfiltfilt(sos, data[:, ch]).astype(np.float32))
+    return np.column_stack(channels)
 
 
 def compressor(data: np.ndarray, sr: int, **params) -> np.ndarray:
-    """Compressor (stub — pass-through)."""
-    return data
+    """Dynamic range compressor with soft knee and auto makeup gain.
+
+    Uses RMS envelope detection in 10ms windows, a soft-knee gain curve,
+    and exponential attack/release smoothing. Supports parallel compression
+    via the ``mix`` parameter.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        threshold_db: Level above which compression starts (dB).
+        ratio: Compression ratio (e.g. 3.0 = 3:1).
+        attack_ms: Attack time (ms) — how fast gain reduction engages.
+        release_ms: Release time (ms) — how fast gain reduction releases.
+        knee_db: Soft knee width in dB (0 = hard knee).
+        makeup_db: Manual makeup gain (None = auto).
+        mix: Dry/wet blend (1.0 = fully compressed, 0.0 = bypass).
+
+    Returns:
+        Compressed audio, same shape and dtype as input.
+    """
+    threshold_db = params.get("threshold_db", -18.0)
+    ratio = params.get("ratio", 3.0)
+    attack_ms = params.get("attack_ms", 15.0)
+    release_ms = params.get("release_ms", 200.0)
+    knee_db = params.get("knee_db", 6.0)
+    makeup_db = params.get("makeup_db", None)
+    mix = params.get("mix", 1.0)
+
+    if data.size == 0 or ratio <= 1.0:
+        return data
+
+    from scipy.interpolate import interp1d
+
+    n_samples = data.shape[0]
+
+    # --- Compute RMS envelope in 10ms windows ---
+    window_size = max(1, int(sr * 0.01))
+
+    # Mono envelope from peak across channels
+    if data.ndim == 1:
+        mono = np.abs(data)
+    else:
+        mono = np.abs(data).max(axis=1)
+
+    # Pad to make length divisible by window_size
+    pad_len = (window_size - (n_samples % window_size)) % window_size
+    padded = np.concatenate([mono, np.zeros(pad_len, dtype=mono.dtype)])
+
+    # Block-level RMS
+    blocks = padded.reshape(-1, window_size)
+    block_rms = np.sqrt(np.mean(blocks ** 2, axis=1))
+
+    # Convert to dB (floor at -120 dB to avoid log(0))
+    block_db = 20.0 * np.log10(np.maximum(block_rms, 1e-6))
+
+    # --- Soft-knee gain curve (dB domain) ---
+    half_knee = knee_db / 2.0
+    gain_reduction_db = np.zeros_like(block_db)
+
+    for i, level_db in enumerate(block_db):
+        if level_db < threshold_db - half_knee:
+            # Below knee — no compression
+            gain_reduction_db[i] = 0.0
+        elif level_db > threshold_db + half_knee:
+            # Above knee — full compression
+            over = level_db - threshold_db
+            gain_reduction_db[i] = over - over / ratio
+        else:
+            # In knee — quadratic interpolation
+            x = level_db - (threshold_db - half_knee)
+            gain_reduction_db[i] = ((1.0 / ratio - 1.0) * x * x) / (2.0 * knee_db) if knee_db > 0 else 0.0
+
+    # --- Attack/release smoothing on block-level gain reduction ---
+    block_duration_s = window_size / sr
+    alpha_attack = 1.0 - np.exp(-block_duration_s / max(attack_ms / 1000.0, 1e-6))
+    alpha_release = 1.0 - np.exp(-block_duration_s / max(release_ms / 1000.0, 1e-6))
+
+    smoothed_gr = np.empty_like(gain_reduction_db)
+    smoothed_gr[0] = gain_reduction_db[0]
+    for i in range(1, len(gain_reduction_db)):
+        if gain_reduction_db[i] > smoothed_gr[i - 1]:
+            # Gain reduction increasing (attack)
+            smoothed_gr[i] = smoothed_gr[i - 1] + alpha_attack * (
+                gain_reduction_db[i] - smoothed_gr[i - 1])
+        else:
+            # Gain reduction decreasing (release)
+            smoothed_gr[i] = smoothed_gr[i - 1] + alpha_release * (
+                gain_reduction_db[i] - smoothed_gr[i - 1])
+
+    # --- Interpolate block-level gain to sample-level ---
+    block_centers = np.arange(len(smoothed_gr)) * window_size + window_size // 2
+    block_centers = np.clip(block_centers, 0, n_samples - 1)
+    interp_fn = interp1d(
+        block_centers, smoothed_gr, kind="linear",
+        bounds_error=False, fill_value=(smoothed_gr[0], smoothed_gr[-1]),
+    )
+    sample_gr_db = interp_fn(np.arange(n_samples))
+
+    # --- Auto makeup gain: compensate 70% of average gain reduction ---
+    if makeup_db is None:
+        avg_gr = np.mean(sample_gr_db)
+        makeup_db = avg_gr * 0.7
+    else:
+        makeup_db = float(makeup_db)
+
+    # --- Apply gain ---
+    total_gain_db = -sample_gr_db + makeup_db
+    gain_linear = (10.0 ** (total_gain_db / 20.0)).astype(np.float32)
+
+    if data.ndim == 1:
+        compressed = data * gain_linear
+    else:
+        compressed = data * gain_linear[:, np.newaxis]
+
+    # --- Parallel compression (dry/wet blend) ---
+    if mix < 1.0:
+        result = data * (1.0 - mix) + compressed * mix
+    else:
+        result = compressed
+
+    return result.astype(np.float32)
 
 
 def de_esser(data: np.ndarray, sr: int, **params) -> np.ndarray:

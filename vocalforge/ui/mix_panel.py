@@ -213,13 +213,36 @@ class MixPanel(QWidget):
                              controls=[hpf_spin])
         self._effect_controls["highpass_filter"] = {"spin": hpf_spin}
 
-        # 5. Parametric EQ (stub)
+        # 5. Parametric EQ (working)
+        eq_combo = QComboBox()
+        eq_combo.addItems(["Clean Up", "Warm", "Bright"])
+        eq_combo.setCurrentIndex(0)
+        eq_combo.setToolTip("EQ preset: shape the vocal tone")
         self._add_effect_row(ecl, "parametric_eq", "Parametric EQ",
-                             stub=True)
+                             stub=False, controls=[eq_combo])
+        self._effect_controls["parametric_eq"] = {"combo": eq_combo}
+        self._effect_checkboxes["parametric_eq"].setChecked(False)
 
-        # 6. Compressor (stub)
+        # 6. Compressor (working)
+        comp_thresh_spin = QSpinBox()
+        comp_thresh_spin.setRange(-40, 0)
+        comp_thresh_spin.setValue(-18)
+        comp_thresh_spin.setSuffix(" dB")
+        comp_thresh_spin.setToolTip("Threshold above which compression starts")
+        comp_ratio_spin = QDoubleSpinBox()
+        comp_ratio_spin.setRange(1.0, 20.0)
+        comp_ratio_spin.setValue(3.0)
+        comp_ratio_spin.setSingleStep(0.5)
+        comp_ratio_spin.setSuffix(":1")
+        comp_ratio_spin.setToolTip("Compression ratio")
         self._add_effect_row(ecl, "compressor", "Compressor",
-                             stub=True)
+                             stub=False,
+                             controls=[comp_thresh_spin, comp_ratio_spin])
+        self._effect_controls["compressor"] = {
+            "threshold_spin": comp_thresh_spin,
+            "ratio_spin": comp_ratio_spin,
+        }
+        self._effect_checkboxes["compressor"].setChecked(False)
 
         # 7. De-Esser (stub)
         self._add_effect_row(ecl, "de_esser", "De-Esser", stub=True)
@@ -411,6 +434,18 @@ class MixPanel(QWidget):
                 if "spin" in ctrls and "cutoff_hz" in cfg:
                     ctrls["spin"].setValue(int(cfg["cutoff_hz"]))
 
+            elif key == "parametric_eq":
+                if "combo" in ctrls and "preset" in cfg:
+                    _EQ_PRESET_INDEX = {"clean_up": 0, "warm": 1, "bright": 2}
+                    idx = _EQ_PRESET_INDEX.get(cfg["preset"], 0)
+                    ctrls["combo"].setCurrentIndex(idx)
+
+            elif key == "compressor":
+                if "threshold_spin" in ctrls and "threshold_db" in cfg:
+                    ctrls["threshold_spin"].setValue(int(cfg["threshold_db"]))
+                if "ratio_spin" in ctrls and "ratio" in cfg:
+                    ctrls["ratio_spin"].setValue(float(cfg["ratio"]))
+
             elif key == "limiter":
                 if "spin" in ctrls and "ceiling_db" in cfg:
                     ctrls["spin"].setValue(cfg["ceiling_db"])
@@ -493,11 +528,26 @@ class MixPanel(QWidget):
             "cutoff_hz": float(hpf_spin.value()),
         }
 
-        # Parametric EQ (stub)
-        config["parametric_eq"] = {"enabled": False}
+        # Parametric EQ
+        from vocalforge.audio.effects import EQ_PRESETS
+        eq_cb = self._effect_checkboxes["parametric_eq"]
+        eq_combo = self._effect_controls["parametric_eq"]["combo"]
+        eq_preset_map = {0: "clean_up", 1: "warm", 2: "bright"}
+        eq_preset_name = eq_preset_map[eq_combo.currentIndex()]
+        config["parametric_eq"] = {
+            "enabled": eq_cb.isChecked(),
+            "preset": eq_preset_name,
+            "bands": EQ_PRESETS[eq_preset_name],
+        }
 
-        # Compressor (stub)
-        config["compressor"] = {"enabled": False}
+        # Compressor
+        comp_cb = self._effect_checkboxes["compressor"]
+        comp_ctrls = self._effect_controls["compressor"]
+        config["compressor"] = {
+            "enabled": comp_cb.isChecked(),
+            "threshold_db": float(comp_ctrls["threshold_spin"].value()),
+            "ratio": comp_ctrls["ratio_spin"].value(),
+        }
 
         # De-Esser (stub)
         config["de_esser"] = {"enabled": False}
