@@ -1,7 +1,6 @@
 """Mix panel — effects chain controls, alignment, and export."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -10,41 +9,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSlider,
     QSpinBox,
-    QStyle,
-    QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
 
-
-class _JumpSlider(QSlider):
-    """QSlider that jumps to the clicked position instead of page-stepping."""
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            opt = QStyleOptionSlider()
-            self.initStyleOption(opt)
-            groove = self.style().subControlRect(
-                QStyle.ComplexControl.CC_Slider, opt,
-                QStyle.SubControl.SC_SliderGroove, self,
-            )
-            if self.orientation() == Qt.Orientation.Horizontal:
-                pos = event.position().x()
-                val = QStyle.sliderValueFromPosition(
-                    self.minimum(), self.maximum(),
-                    int(pos - groove.x()), groove.width(),
-                )
-            else:
-                pos = event.position().y()
-                val = QStyle.sliderValueFromPosition(
-                    self.minimum(), self.maximum(),
-                    int(pos - groove.y()), groove.height(),
-                    upsideDown=True,
-                )
-            self.setValue(val)
-        super().mousePressEvent(event)
+from vocalforge.ui import JumpSlider
 
 
 # Effect display definitions: (config_key, label, stub, controls_factory)
@@ -60,6 +30,7 @@ class MixPanel(QWidget):
     minus_offset_changed = Signal(float)   # ms
     vocal_offset_changed = Signal(float)   # ms
     apply_effects_clicked = Signal()
+    export_vocal_clicked = Signal()
     auto_tune_clicked = Signal()
 
     def __init__(self, parent=None):
@@ -85,7 +56,7 @@ class MixPanel(QWidget):
         # Minus offset slider
         minus_off_row = QHBoxLayout()
         minus_off_row.addWidget(QLabel("Minus offset:"))
-        self._minus_offset_slider = _JumpSlider(Qt.Horizontal)
+        self._minus_offset_slider = JumpSlider(Qt.Horizontal)
         self._minus_offset_slider.setRange(-30000, 30000)
         self._minus_offset_slider.setValue(0)
         self._minus_offset_slider.setSingleStep(1)
@@ -104,7 +75,7 @@ class MixPanel(QWidget):
         # Vocal offset slider
         vocal_off_row = QHBoxLayout()
         vocal_off_row.addWidget(QLabel("Vocal offset:"))
-        self._vocal_offset_slider = _JumpSlider(Qt.Horizontal)
+        self._vocal_offset_slider = JumpSlider(Qt.Horizontal)
         self._vocal_offset_slider.setRange(-30000, 30000)
         self._vocal_offset_slider.setValue(0)
         self._vocal_offset_slider.setSingleStep(1)
@@ -162,22 +133,74 @@ class MixPanel(QWidget):
 
         self._effect_checkboxes: dict[str, QCheckBox] = {}
         self._effect_controls: dict[str, dict] = {}
+        self._preset_updating = False  # guard against recursive signals
 
-        # 1. Noise Gate (stub)
-        self._add_effect_row(effects_layout, "noise_gate", "Noise Gate",
-                             stub=True)
+        # Global bypass checkbox
+        self._effects_enabled_cb = QCheckBox("Enable Effects Chain")
+        self._effects_enabled_cb.setChecked(True)
+        self._effects_enabled_cb.setToolTip(
+            "Uncheck to skip all effects (use for pre-enhanced vocals)"
+        )
+        self._effects_enabled_cb.toggled.connect(self._on_effects_enabled_toggled)
+        effects_layout.addWidget(self._effects_enabled_cb)
+
+        # Container widget for all effect controls (toggled by bypass checkbox)
+        self._effects_container = QWidget()
+        self._effects_container_layout = QVBoxLayout(self._effects_container)
+        self._effects_container_layout.setContentsMargins(0, 0, 0, 0)
+        effects_layout.addWidget(self._effects_container)
+
+        # Preset row (top of effects container)
+        ecl = self._effects_container_layout
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Preset:"))
+        self._preset_combo = QComboBox()
+        self._preset_combo.addItems(["Custom", "Raw", "Clean", "Enhanced"])
+        preset_row.addWidget(self._preset_combo, stretch=1)
+        preset_row.addStretch()
+        ecl.addLayout(preset_row)
+        self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+
+        # 1. Noise Gate (working)
+        gate_thresh_spin = QSpinBox()
+        gate_thresh_spin.setRange(-60, -20)
+        gate_thresh_spin.setValue(-35)
+        gate_thresh_spin.setSuffix(" dB")
+        gate_thresh_spin.setToolTip("Threshold below which the gate closes")
+        gate_reduction_spin = QSpinBox()
+        gate_reduction_spin.setRange(-60, 0)
+        gate_reduction_spin.setValue(-40)
+        gate_reduction_spin.setSuffix(" dB")
+        gate_reduction_spin.setToolTip("Attenuation when gate is closed")
+        self._add_effect_row(ecl, "noise_gate", "Noise Gate",
+                             stub=False,
+                             controls=[gate_thresh_spin, gate_reduction_spin])
+        self._effect_controls["noise_gate"] = {
+            "threshold_spin": gate_thresh_spin,
+            "reduction_spin": gate_reduction_spin,
+        }
+        # Default: unchecked (matches DEFAULT_CONFIG enabled=False)
+        self._effect_checkboxes["noise_gate"].setChecked(False)
 
         # 2. Noise Reduction (working)
         nr_combo = QComboBox()
         nr_combo.addItems(["Subtle", "Moderate", "Aggressive"])
         nr_combo.setCurrentIndex(1)
-        self._add_effect_row(effects_layout, "spectral_noise_reduction",
+        self._add_effect_row(ecl, "spectral_noise_reduction",
                              "Noise Reduction", stub=False,
                              controls=[nr_combo])
         self._effect_controls["spectral_noise_reduction"] = {"combo": nr_combo}
 
-        # 3. De-Reverb (stub)
-        self._add_effect_row(effects_layout, "dereverb", "De-Reverb", stub=True)
+        # 3. De-Reverb (working)
+        dereverb_combo = QComboBox()
+        dereverb_combo.addItems(["Light", "Medium", "Strong"])
+        dereverb_combo.setCurrentIndex(0)
+        self._add_effect_row(ecl, "dereverb", "De-Reverb",
+                             stub=False,
+                             controls=[dereverb_combo])
+        self._effect_controls["dereverb"] = {"combo": dereverb_combo}
+        # Default: unchecked (matches DEFAULT_CONFIG enabled=False)
+        self._effect_checkboxes["dereverb"].setChecked(False)
 
         # 4. High-Pass Filter (working)
         hpf_spin = QSpinBox()
@@ -185,24 +208,24 @@ class MixPanel(QWidget):
         hpf_spin.setValue(80)
         hpf_spin.setSuffix(" Hz")
         hpf_spin.setToolTip("High-pass filter cutoff (0 = disabled)")
-        self._add_effect_row(effects_layout, "highpass_filter",
+        self._add_effect_row(ecl, "highpass_filter",
                              "High-Pass Filter", stub=False,
                              controls=[hpf_spin])
         self._effect_controls["highpass_filter"] = {"spin": hpf_spin}
 
         # 5. Parametric EQ (stub)
-        self._add_effect_row(effects_layout, "parametric_eq", "Parametric EQ",
+        self._add_effect_row(ecl, "parametric_eq", "Parametric EQ",
                              stub=True)
 
         # 6. Compressor (stub)
-        self._add_effect_row(effects_layout, "compressor", "Compressor",
+        self._add_effect_row(ecl, "compressor", "Compressor",
                              stub=True)
 
         # 7. De-Esser (stub)
-        self._add_effect_row(effects_layout, "de_esser", "De-Esser", stub=True)
+        self._add_effect_row(ecl, "de_esser", "De-Esser", stub=True)
 
         # 8. Reverb (stub)
-        self._add_effect_row(effects_layout, "reverb", "Reverb", stub=True)
+        self._add_effect_row(ecl, "reverb", "Reverb", stub=True)
 
         # 9. Limiter (working)
         limiter_spin = QDoubleSpinBox()
@@ -211,9 +234,19 @@ class MixPanel(QWidget):
         limiter_spin.setSingleStep(0.1)
         limiter_spin.setSuffix(" dB")
         limiter_spin.setToolTip("Limiter ceiling in dB")
-        self._add_effect_row(effects_layout, "limiter", "Limiter", stub=False,
+        self._add_effect_row(ecl, "limiter", "Limiter", stub=False,
                              controls=[limiter_spin])
         self._effect_controls["limiter"] = {"spin": limiter_spin}
+
+        # Connect all working effect controls to switch preset to "Custom"
+        for key, cb in self._effect_checkboxes.items():
+            cb.toggled.connect(self._on_effect_manual_change)
+        for key, ctrls in self._effect_controls.items():
+            for ctrl in ctrls.values():
+                if isinstance(ctrl, QComboBox):
+                    ctrl.currentIndexChanged.connect(self._on_effect_manual_change)
+                elif isinstance(ctrl, (QSpinBox, QDoubleSpinBox)):
+                    ctrl.valueChanged.connect(self._on_effect_manual_change)
 
         # Apply Effects button
         self._apply_effects_btn = QPushButton("Apply Effects to Vocal")
@@ -223,6 +256,15 @@ class MixPanel(QWidget):
         )
         self._apply_effects_btn.clicked.connect(self.apply_effects_clicked)
         effects_layout.addWidget(self._apply_effects_btn)
+
+        # Export Processed Vocal button
+        self._export_vocal_btn = QPushButton("Export Processed Vocal")
+        self._export_vocal_btn.setEnabled(False)
+        self._export_vocal_btn.setToolTip(
+            "Save the processed vocal track to a file"
+        )
+        self._export_vocal_btn.clicked.connect(self.export_vocal_clicked)
+        effects_layout.addWidget(self._export_vocal_btn)
 
         # Effects status label
         self._effects_status = QLabel("")
@@ -235,20 +277,6 @@ class MixPanel(QWidget):
         # ============================================================
         mix_group = QGroupBox("Mix && Export")
         mix_layout = QVBoxLayout(mix_group)
-
-        # Vocal balance slider
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(QLabel("Vocal:"))
-        self._vocal_slider = QSlider(Qt.Horizontal)
-        self._vocal_slider.setRange(0, 100)
-        self._vocal_slider.setValue(75)
-        self._vocal_slider.setTickPosition(QSlider.TicksBelow)
-        self._vocal_slider.setTickInterval(25)
-        slider_row.addWidget(self._vocal_slider, stretch=1)
-        self._vocal_value_label = QLabel("1.5x")
-        self._vocal_slider.valueChanged.connect(self._on_slider_changed)
-        slider_row.addWidget(self._vocal_value_label)
-        mix_layout.addLayout(slider_row)
 
         # Target LUFS spinner
         lufs_row = QHBoxLayout()
@@ -327,19 +355,79 @@ class MixPanel(QWidget):
 
         parent_layout.addLayout(row)
 
-    # --- Slider callback ---
+    # --- Preset handling ---
 
-    def _on_slider_changed(self, value: int) -> None:
-        gain = value / 50.0
-        self._vocal_value_label.setText(f"{gain:.1f}x")
+    def _on_preset_changed(self, index: int) -> None:
+        """Apply a preset's effect settings to all UI controls."""
+        if self._preset_updating:
+            return
+        name = self._preset_combo.currentText()
+        if name == "Custom":
+            return  # user manually selected Custom, nothing to apply
+
+        from vocalforge.audio.effects import PRESET_CONFIGS
+        preset = PRESET_CONFIGS.get(name)
+        if preset is None:
+            return
+
+        self._preset_updating = True
+        try:
+            self._apply_preset_config(preset)
+        finally:
+            self._preset_updating = False
+
+    def _apply_preset_config(self, preset: dict) -> None:
+        """Set all effect checkboxes and control values from a preset dict."""
+        _NR_STRENGTH_INDEX = {0.5: 0, 0.75: 1, 1.0: 2}
+        _DR_STRENGTH_INDEX = {0.3: 0, 0.5: 1, 0.7: 2}
+
+        for key, cfg in preset.items():
+            cb = self._effect_checkboxes.get(key)
+            if cb is None:
+                continue
+            enabled = cfg.get("enabled", False)
+            if cb.isEnabled():  # skip stub checkboxes
+                cb.setChecked(enabled)
+
+            ctrls = self._effect_controls.get(key, {})
+
+            if key == "noise_gate":
+                if "threshold_spin" in ctrls and "threshold_db" in cfg:
+                    ctrls["threshold_spin"].setValue(int(cfg["threshold_db"]))
+                if "reduction_spin" in ctrls and "reduction_db" in cfg:
+                    ctrls["reduction_spin"].setValue(int(cfg["reduction_db"]))
+
+            elif key == "spectral_noise_reduction":
+                if "combo" in ctrls and "strength" in cfg:
+                    idx = _NR_STRENGTH_INDEX.get(cfg["strength"], 1)
+                    ctrls["combo"].setCurrentIndex(idx)
+
+            elif key == "dereverb":
+                if "combo" in ctrls and "strength" in cfg:
+                    idx = _DR_STRENGTH_INDEX.get(cfg["strength"], 0)
+                    ctrls["combo"].setCurrentIndex(idx)
+
+            elif key == "highpass_filter":
+                if "spin" in ctrls and "cutoff_hz" in cfg:
+                    ctrls["spin"].setValue(int(cfg["cutoff_hz"]))
+
+            elif key == "limiter":
+                if "spin" in ctrls and "ceiling_db" in cfg:
+                    ctrls["spin"].setValue(cfg["ceiling_db"])
+
+    def _on_effect_manual_change(self, *_args) -> None:
+        """Any manual change to an effect control switches preset to Custom."""
+        if self._preset_updating:
+            return
+        self._preset_updating = True
+        self._preset_combo.setCurrentIndex(0)  # "Custom"
+        self._preset_updating = False
+
+    def _on_effects_enabled_toggled(self, enabled: bool) -> None:
+        """Show/hide the effects container when the global bypass toggles."""
+        self._effects_container.setVisible(enabled)
 
     # --- Public getters ---
-
-    def vocal_gain(self) -> float:
-        return self._vocal_slider.value() / 50.0
-
-    def instrumental_gain(self) -> float:
-        return 1.0
 
     def target_lufs(self) -> float:
         return self._lufs_spin.value()
@@ -360,14 +448,24 @@ class MixPanel(QWidget):
     def vocal_offset_ms(self) -> float:
         return float(self._vocal_offset_slider.value())
 
+    def effects_chain_enabled(self) -> bool:
+        """Return whether the global effects chain is enabled."""
+        return self._effects_enabled_cb.isChecked()
+
     # --- Effects config ---
 
     def get_effects_config(self) -> dict:
         """Read all effect controls and return config for process_vocal()."""
         config = {}
 
-        # Noise Gate (stub)
-        config["noise_gate"] = {"enabled": False}
+        # Noise Gate
+        gate_cb = self._effect_checkboxes["noise_gate"]
+        gate_ctrls = self._effect_controls["noise_gate"]
+        config["noise_gate"] = {
+            "enabled": gate_cb.isChecked(),
+            "threshold_db": float(gate_ctrls["threshold_spin"].value()),
+            "reduction_db": float(gate_ctrls["reduction_spin"].value()),
+        }
 
         # Noise Reduction
         nr_cb = self._effect_checkboxes["spectral_noise_reduction"]
@@ -378,8 +476,14 @@ class MixPanel(QWidget):
             "strength": strength_map[nr_combo.currentIndex()],
         }
 
-        # De-Reverb (stub)
-        config["dereverb"] = {"enabled": False}
+        # De-Reverb
+        dr_cb = self._effect_checkboxes["dereverb"]
+        dr_combo = self._effect_controls["dereverb"]["combo"]
+        strength_map_dr = {0: 0.3, 1: 0.5, 2: 0.7}
+        config["dereverb"] = {
+            "enabled": dr_cb.isChecked(),
+            "strength": strength_map_dr[dr_combo.currentIndex()],
+        }
 
         # High-Pass Filter
         hpf_cb = self._effect_checkboxes["highpass_filter"]
@@ -454,6 +558,9 @@ class MixPanel(QWidget):
 
     def set_apply_effects_enabled(self, enabled: bool) -> None:
         self._apply_effects_btn.setEnabled(enabled)
+
+    def set_export_vocal_enabled(self, enabled: bool) -> None:
+        self._export_vocal_btn.setEnabled(enabled)
 
     def set_effects_status(self, text: str) -> None:
         self._effects_status.setText(text)

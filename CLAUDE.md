@@ -23,16 +23,17 @@ VocalForge/
 │   ├── __main__.py          # Entry point: python -m vocalforge
 │   ├── app.py               # QApplication setup, main window
 │   ├── ui/
-│   │   ├── __init__.py
+│   │   ├── __init__.py      # Shared widgets (JumpSlider)
 │   │   ├── main_window.py   # Main window layout, panel orchestration
 │   │   ├── import_panel.py  # Song loading, separation trigger
 │   │   ├── record_panel.py  # Recording controls, device selection
-│   │   ├── mix_panel.py     # Mixing controls, export
+│   │   ├── mix_panel.py     # Mixing controls, effects, presets, export
 │   │   └── waveform.py      # Waveform display widget (shared)
 │   ├── audio/
 │   │   ├── __init__.py
 │   │   ├── engine.py           # Playback + recording streams (sounddevice)
 │   │   ├── alignment.py        # Cross-correlation alignment (constrained)
+│   │   ├── effects.py          # 9-stage vocal processing pipeline
 │   │   ├── mixer.py            # LUFS normalization + mixing
 │   │   └── noise_reduction.py  # Spectral gating + high-pass filter
 │   ├── separation/
@@ -43,9 +44,12 @@ VocalForge/
 │       └── audio_io.py      # Load/save audio files (soundfile wrapper)
 ├── tests/
 │   ├── test_alignment.py
+│   ├── test_audio_io.py
+│   ├── test_effects.py
+│   ├── test_engine.py
 │   ├── test_mixer.py
 │   ├── test_noise_reduction.py
-│   └── test_audio_io.py
+│   └── test_waveform.py
 ├── requirements.txt
 ├── README.md
 ├── CLAUDE.md
@@ -140,7 +144,7 @@ Development follows PROJECT.md phases. Each phase is self-contained:
 - **Phases 1–5:** Core workflow — skeleton, audio loading, playback, recording, alignment + mixing [DONE]
 - **Phase 6 (a–d):** Demucs separation, noise reduction, chain alignment, constrained alignment, HPF [DONE]
 - **Phase 7 (a–d):** Interactive alignment, multi-track preview, offset sliders, mono waveforms [DONE]
-- **Phase 8a:** Noise gate + de-reverb + preset system [v0.2.0]
+- **Phase 8a:** Noise gate + de-reverb + preset system + UX improvements [DONE]
 - **Phase 8b:** Parametric EQ + compressor [v0.3.0]
 - **Phase 8c:** De-esser + reverb — completes all 9 vocal enhancers [v0.4.0]
 - **Phase 10:** Auto-tune research & prototyping [v0.6.0]

@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from vocalforge.ui.waveform import WaveformWidget
+from vocalforge.ui import JumpSlider
+
+from vocalforge.ui.waveform import LevelMeterWidget, WaveformWidget
 from vocalforge.utils.audio_io import get_audio_info, load_audio
 
 _FILE_FILTER = "Audio Files (*.wav *.flac *.ogg);;All Files (*)"
@@ -62,6 +64,10 @@ class ImportPanel(QWidget):
         self._info_labels: dict[str, QLabel] = {}
         self._vol_sliders: dict[str, QSlider] = {}
         self._vol_labels: dict[str, QLabel] = {}
+        self._status_labels: dict[str, QLabel] = {}  # prefix labels for track rows
+        self._track_containers: dict[str, QWidget] = {}
+        self._level_meters: dict[str, LevelMeterWidget] = {}
+        self._meter_smoothed: dict[str, float] = {s: 0.0 for s in _SLOT_NAMES}
 
         # Outer layout with scroll area
         outer_layout = QVBoxLayout(self)
@@ -129,7 +135,7 @@ class ImportPanel(QWidget):
         """Create a volume slider row for a track."""
         row = QHBoxLayout()
         row.addWidget(QLabel("Vol:"))
-        slider = QSlider(Qt.Horizontal)
+        slider = JumpSlider(Qt.Horizontal)
         slider.setRange(0, 200)
         slider.setValue(100)
         slider.setFixedHeight(18)
@@ -156,11 +162,27 @@ class ImportPanel(QWidget):
         # Emit signal for engine gain update
         self.track_gain_changed.emit(slot_name, gain)
 
+    def _update_status_label(self, slot_name: str) -> None:
+        """Update prefix label text based on whether track data exists."""
+        label = self._status_labels.get(slot_name)
+        if label is None:
+            return
+        has_data = self._tracks.get(slot_name) is not None
+        if slot_name == "vocal_processed":
+            label.setText("Processed:" if has_data else "Not yet processed:")
+        elif slot_name == "mix_result":
+            label.setText("Mix:" if has_data else "Not yet mixed:")
+
+    def update_mix_highlights(self) -> None:
+        """No-op — highlighting removed (visual clutter)."""
+        pass
+
     def _create_track_group(
         self, slot_name: str, title: str, load_button: str | None = None
     ) -> QGroupBox:
         """Create a group box with optional load button, labels, and waveform."""
         group = QGroupBox(title)
+        self._track_containers[slot_name] = group
         group_layout = QVBoxLayout(group)
 
         # Top row: load button + filename
@@ -214,17 +236,25 @@ class ImportPanel(QWidget):
         # Volume slider
         group_layout.addLayout(self._create_volume_row(slot_name))
 
+        # Level meter
+        meter = LevelMeterWidget()
+        self._level_meters[slot_name] = meter
+        group_layout.addWidget(meter)
+
         return group
 
     def _create_track_row(self, slot_name: str, label_text: str) -> QWidget:
         """Create a compact track row (no load button) inside a parent group."""
         container = QWidget()
+        self._track_containers[slot_name] = container
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
 
         # Top row: label + filename
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel(f"{label_text}:"))
+        prefix_label = QLabel(f"{label_text}:")
+        top_row.addWidget(prefix_label)
+        self._status_labels[slot_name] = prefix_label
 
         file_label = QLabel("\u2014")
         self._file_labels[slot_name] = file_label
@@ -245,6 +275,11 @@ class ImportPanel(QWidget):
 
         # Volume slider
         container_layout.addLayout(self._create_volume_row(slot_name))
+
+        # Level meter
+        meter = LevelMeterWidget()
+        self._level_meters[slot_name] = meter
+        container_layout.addWidget(meter)
 
         return container
 
@@ -363,6 +398,7 @@ class ImportPanel(QWidget):
         if slider:
             slider.setValue(100)
 
+        self._update_status_label(slot_name)
         self.track_loaded.emit(slot_name)
 
     def set_minus_sep_track(
@@ -413,6 +449,7 @@ class ImportPanel(QWidget):
         slider = self._vol_sliders.get(slot_name)
         if slider:
             slider.setValue(100)
+        self._update_status_label(slot_name)
         self.track_loaded.emit(slot_name)
 
     # --- Volume fader access ---
@@ -481,6 +518,67 @@ class ImportPanel(QWidget):
     @property
     def mix_result_track(self) -> tuple | None:
         return self._tracks["mix_result"]
+
+    # --- Level meters ---
+
+    def update_level_meters(
+        self,
+        position_samples: int,
+        total_frames: int,
+        offsets: dict[str, int],
+    ) -> None:
+        """Compute RMS of a 50ms window around current position for each track."""
+        alpha = 0.3  # EMA smoothing
+
+        for slot in _SLOT_NAMES:
+            meter = self._level_meters.get(slot)
+            if meter is None:
+                continue
+            track = self._tracks.get(slot)
+            if track is None:
+                meter.set_level(0.0)
+                continue
+
+            data, sr = track
+            track_len = data.shape[0]
+            offset = offsets.get(slot, 0)
+
+            # Convert global position to local track position
+            local_pos = position_samples - offset
+            if local_pos < 0 or local_pos >= track_len:
+                meter.set_level(0.0)
+                continue
+
+            # 50ms window
+            half_win = int(sr * 0.025)
+            start = max(0, local_pos - half_win)
+            end = min(track_len, local_pos + half_win)
+
+            chunk = data[start:end]
+            if chunk.ndim > 1:
+                chunk = chunk.mean(axis=1)
+
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            # Apply gain
+            gain = self.get_track_gain(slot)
+            rms *= gain
+
+            # EMA smoothing
+            prev = self._meter_smoothed.get(slot, 0.0)
+            smoothed = alpha * rms + (1.0 - alpha) * prev
+            self._meter_smoothed[slot] = smoothed
+
+            # Scale: RMS of 0.3 → full bar (typical vocal RMS after normalization)
+            display = min(1.0, smoothed / 0.3)
+            meter.set_level(display)
+
+    def reset_level_meters(self) -> None:
+        """Zero all level meters."""
+        for slot in _SLOT_NAMES:
+            meter = self._level_meters.get(slot)
+            if meter is not None:
+                meter.reset()
+            self._meter_smoothed[slot] = 0.0
 
     # --- Global cursor + offset helpers ---
 

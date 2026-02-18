@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QPushButton, QSlider, QDoubleSpinBox,
 )
 
+from vocalforge.ui import JumpSlider
+
 from vocalforge.audio.engine import (
     get_input_devices, get_output_devices,
     get_default_input_device, get_default_output_device,
@@ -109,7 +111,7 @@ class RecordPanel(QWidget):
         playback_layout.addWidget(self._time_label)
 
         # Seek slider
-        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider = JumpSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setRange(0, 10000)
         self._seek_slider.setValue(0)
         playback_layout.addWidget(self._seek_slider)
@@ -117,7 +119,7 @@ class RecordPanel(QWidget):
         # Volume slider
         vol_row = QHBoxLayout()
         vol_row.addWidget(QLabel("Volume:"))
-        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider = JumpSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
         self._volume_slider.setValue(100)
         vol_row.addWidget(self._volume_slider, stretch=1)

@@ -224,16 +224,19 @@ class _MixWorker(QThread):
             if has_manual:
                 vocal_offset = self._manual_vocal_offset or 0
                 minus_offset = self._manual_minus_offset or 0
+                # Compute net vocal offset relative to the minus track.
+                # Both offsets are relative to the separated stems timeline.
+                # For mixing we keep the minus track unshifted and only
+                # shift the vocal by the difference.
+                net_vocal_offset = vocal_offset - minus_offset
                 self.progress.emit(
-                    f"Manual offsets: vocal={vocal_offset}, minus={minus_offset}"
+                    f"Manual offsets: vocal={vocal_offset}, minus={minus_offset}, "
+                    f"net vocal-to-minus={net_vocal_offset}"
                 )
-                aligned_vocal = shift_track(vocal, vocal_offset, target_len)
-                if minus_offset != 0:
-                    minus_for_mix = shift_track(
-                        self._minus_data, minus_offset, target_len,
-                    )
-                align_info["lag_samples"] = vocal_offset
-                align_info["lag_ms"] = vocal_offset / sr * 1000.0
+                aligned_vocal = shift_track(vocal, net_vocal_offset, target_len)
+                # minus_for_mix stays as self._minus_data (unshifted)
+                align_info["lag_samples"] = net_vocal_offset
+                align_info["lag_ms"] = net_vocal_offset / sr * 1000.0
             elif self._alignment_mode == "none":
                 self.progress.emit("Padding/trimming (no alignment)...")
                 aligned_vocal = pad_or_trim(vocal, target_len)
@@ -243,11 +246,18 @@ class _MixWorker(QThread):
                     self.progress.emit("Chain-aligning through stems...")
                     is_import = self._minus_data is not minus_sep
                     minus_import = self._minus_data if is_import else None
-                    minus_for_mix, aligned_vocal, align_info = chain_align(
+                    _, _, align_info = chain_align(
                         minus_sep, vocal_sep, vocal, sr,
                         minus_import=minus_import,
                         max_offset_s=self._max_offset_s,
                     )
+                    # Keep the full minus track; shift vocal by the net offset
+                    net_lag = (align_info.get("vocal_lag_samples", 0)
+                               - align_info.get("minus_lag_samples", 0))
+                    aligned_vocal = shift_track(vocal, net_lag, target_len)
+                    align_info["lag_samples"] = net_lag
+                    align_info["lag_ms"] = net_lag / sr * 1000.0
+                    # minus_for_mix stays as self._minus_data (unshifted)
                 elif self._vocals_stem_path is not None:
                     self.progress.emit("Loading vocals stem...")
                     import soundfile as sf
@@ -462,6 +472,7 @@ class MainWindow(QMainWindow):
 
         # Waveform total frames (includes offsets — may differ from engine total)
         self._waveform_total_frames: int = 0
+        self._track_offsets: dict[str, int] = {}  # per-track offsets for meters
 
         # Worker references (prevent GC while running)
         self._mix_worker: _MixWorker | None = None
@@ -514,6 +525,7 @@ class MainWindow(QMainWindow):
 
         # Connect signals — effects & auto-tune
         self._mix_panel.apply_effects_clicked.connect(self._on_apply_effects)
+        self._mix_panel.export_vocal_clicked.connect(self._on_export_vocal)
         self._mix_panel.auto_tune_clicked.connect(self._on_auto_tune)
 
     # --- Track loading ---
@@ -545,6 +557,9 @@ class MainWindow(QMainWindow):
 
         # Always recompute waveform offsets (keeps _waveform_total_frames in sync)
         self._update_waveform_offsets()
+
+        # Update track highlighting for mix
+        self._import_panel.update_mix_highlights()
 
         # Enable record only if a minus track actually exists
         if slot_name in ("minus_sep", "minus_import"):
@@ -727,7 +742,10 @@ class MainWindow(QMainWindow):
             elif slot in ("vocal", "vocal_processed"):
                 off = max_lag - vocal_lag
             elif slot == "mix_result":
-                off = 0
+                # Mix has alignment baked in — its time 0 corresponds
+                # to the alignment point (stems time 0) which sits at
+                # timeline position max_lag.
+                off = max_lag
             else:
                 # song, minus_sep, vocal_sep: reference tracks (lag=0)
                 off = max_lag
@@ -737,6 +755,7 @@ class MainWindow(QMainWindow):
                 total = end
 
         self._waveform_total_frames = total
+        self._track_offsets = offsets
         self._import_panel.apply_waveform_offsets(offsets, total)
 
     # --- Multi-track playback ---
@@ -785,7 +804,10 @@ class MainWindow(QMainWindow):
             elif slot in ("vocal", "vocal_processed"):
                 off = max_lag - vocal_lag
             elif slot == "mix_result":
-                off = 0
+                # Mix has alignment baked in — its time 0 corresponds
+                # to the alignment point (stems time 0) which sits at
+                # timeline position max_lag.
+                off = max_lag
             else:
                 # song, minus_sep, vocal_sep: reference tracks (lag=0)
                 off = max_lag
@@ -883,8 +905,12 @@ class MainWindow(QMainWindow):
         if sep is not None:
             vocal_sep_data, vocal_sep_sr = sep[0].copy(), sep[1]
 
-        # Build effects config from UI
-        effects_config = self._mix_panel.get_effects_config()
+        # Build effects config from UI (bypass if chain disabled)
+        if self._mix_panel.effects_chain_enabled():
+            effects_config = self._mix_panel.get_effects_config()
+        else:
+            from vocalforge.audio.effects import CHAIN_ORDER
+            effects_config = {name: {"enabled": False} for name in CHAIN_ORDER}
 
         # Check for manual offsets from spinners
         manual_minus = None
@@ -900,8 +926,11 @@ class MainWindow(QMainWindow):
             vocal_data,
             vocal_sr,
             output_path,
-            vocal_gain=self._mix_panel.vocal_gain(),
-            instrumental_gain=self._mix_panel.instrumental_gain(),
+            vocal_gain=self._import_panel.get_track_gain("vocal"),
+            instrumental_gain=self._import_panel.get_track_gain(
+                "minus_import" if self._import_panel.minus_import_track is not None
+                else "minus_sep"
+            ),
             target_lufs=self._mix_panel.target_lufs(),
             alignment_mode=alignment_mode,
             vocals_stem_path=self._vocals_stem_path,
@@ -1085,11 +1114,12 @@ class MainWindow(QMainWindow):
         total_sec = self._engine.total_frames / self._engine.sample_rate
         self._record_panel.update_time_display(0.0, total_sec)
         self._record_panel.update_seek_slider(0.0)
-        # Clear all waveform cursors
+        # Clear all waveform cursors and level meters
         for s in _SLOT_NAMES:
             wf = self._import_panel.get_waveform(s)
             if wf is not None:
                 wf.clear_cursor()
+        self._import_panel.reset_level_meters()
 
     def _on_volume_changed(self, value: float) -> None:
         self._engine.volume = value
@@ -1177,6 +1207,9 @@ class MainWindow(QMainWindow):
         # Update ALL waveform cursors (global timeline)
         self._import_panel.set_all_cursors(pos, sr, total_duration=wf_total)
 
+        # Update level meters
+        self._import_panel.update_level_meters(pos, wf_total, self._track_offsets)
+
         # Update time display and seek slider
         self._record_panel.update_time_display(pos / sr, wf_total / sr)
         self._record_panel.update_seek_slider(normalized)
@@ -1191,6 +1224,7 @@ class MainWindow(QMainWindow):
             self._position_timer.stop()
             self._record_panel.update_transport_state(False, False)
             self._record_panel.set_playback_enabled(True)
+            self._import_panel.reset_level_meters()
 
     # --- Apply Effects ---
 
@@ -1201,6 +1235,14 @@ class MainWindow(QMainWindow):
             return
 
         vocal_data, vocal_sr = vocal[0].copy(), vocal[1]
+
+        # If effects chain is bypassed, copy vocal directly to V-proc slot
+        if not self._mix_panel.effects_chain_enabled():
+            self._import_panel.set_vocal_processed_track(vocal_data, vocal_sr)
+            self._mix_panel.set_effects_status("Bypassed (copied raw vocal)")
+            self._mix_panel.set_export_vocal_enabled(True)
+            self._update_auto_tune_ready()
+            return
 
         self._mix_panel.set_apply_effects_enabled(False)
         self._mix_panel.set_effects_status("Processing...")
@@ -1227,6 +1269,7 @@ class MainWindow(QMainWindow):
         self._import_panel.set_vocal_processed_track(data, sr)
         self._mix_panel.set_effects_status("Done")
         self._mix_panel.set_apply_effects_enabled(True)
+        self._mix_panel.set_export_vocal_enabled(True)
         self._update_auto_tune_ready()
         self._effects_worker = None
 
@@ -1235,6 +1278,40 @@ class MainWindow(QMainWindow):
         self._mix_panel.set_apply_effects_enabled(True)
         self._effects_worker = None
         QMessageBox.warning(self, "Effects Error", f"Vocal processing failed:\n{msg}")
+
+    def _on_export_vocal(self) -> None:
+        """Export the processed vocal track to a file."""
+        proc = self._import_panel.vocal_processed_track
+        if proc is None:
+            return
+
+        data, sr = proc
+
+        # Suggest path next to the vocal source
+        default_dir = ""
+        vocal_path = self._import_panel.get_track_path("vocal")
+        if vocal_path:
+            default_dir = os.path.dirname(vocal_path)
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Processed Vocal",
+            os.path.join(default_dir, "vocal_processed.wav"),
+            "WAV Files (*.wav);;FLAC Files (*.flac);;All Files (*)",
+        )
+        if not output_path:
+            return
+
+        try:
+            save_audio(output_path, data, sr)
+            self._mix_panel.set_effects_status(
+                f"Exported: {os.path.basename(output_path)}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Export Error",
+                f"Could not save processed vocal:\n{exc}",
+            )
 
     # --- Auto-Tune Volume ---
 

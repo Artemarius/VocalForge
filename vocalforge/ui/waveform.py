@@ -220,3 +220,72 @@ class WaveformWidget(QWidget):
             painter.drawLine(cursor_x, 0, cursor_x, self.height())
 
         painter.end()
+
+
+_METER_GREEN = QColor("#4CAF50")
+_METER_YELLOW = QColor("#FFEB3B")
+_METER_RED = QColor("#F44336")
+_METER_BG = QColor("#1A1A1A")
+_METER_PEAK_COLOR = QColor("#FFFFFF")
+
+
+class LevelMeterWidget(QWidget):
+    """Horizontal level meter with green/yellow/red zones and peak hold."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level: float = 0.0   # 0.0–1.0
+        self._peak: float = 0.0    # 0.0–1.0
+        self._peak_decay: float = 0.005
+        self.setFixedHeight(8)
+
+    def set_level(self, level: float) -> None:
+        """Set the current RMS level (0.0–1.0). Updates peak hold."""
+        self._level = max(0.0, min(1.0, level))
+        if self._level >= self._peak:
+            self._peak = self._level
+        else:
+            self._peak = max(self._level, self._peak - self._peak_decay)
+        self.update()
+
+    def reset(self) -> None:
+        self._level = 0.0
+        self._peak = 0.0
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        w = self.width()
+        h = self.height()
+        if w < 1 or h < 1:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        # Background
+        painter.fillRect(0, 0, w, h, _METER_BG)
+
+        # Draw filled level bar with color zones
+        fill_w = int(self._level * w)
+        if fill_w > 0:
+            # Green zone: 0–60%
+            green_end = min(fill_w, int(w * 0.6))
+            if green_end > 0:
+                painter.fillRect(0, 0, green_end, h, _METER_GREEN)
+            # Yellow zone: 60–85%
+            yellow_start = int(w * 0.6)
+            yellow_end = min(fill_w, int(w * 0.85))
+            if fill_w > yellow_start and yellow_end > yellow_start:
+                painter.fillRect(yellow_start, 0, yellow_end - yellow_start, h, _METER_YELLOW)
+            # Red zone: 85–100%
+            red_start = int(w * 0.85)
+            if fill_w > red_start:
+                painter.fillRect(red_start, 0, fill_w - red_start, h, _METER_RED)
+
+        # Peak hold indicator (2px wide)
+        if self._peak > 0.01:
+            peak_x = int(self._peak * w)
+            peak_x = max(0, min(peak_x, w - 2))
+            painter.fillRect(peak_x, 0, 2, h, _METER_PEAK_COLOR)
+
+        painter.end()
