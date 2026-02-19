@@ -1,17 +1,21 @@
-"""Effects chain — 9-stage vocal processing pipeline.
+"""Effects chain — 13-stage vocal processing pipeline.
 
 Each effect function takes (data, sr, **params) and returns a same-shape
 float32 array. The chain order follows VOCAL_ENHANCEMENT.md:
 
-    1. Noise Gate        (RMS-envelope gating)
-    2. Spectral NR       (wraps noise_reduction.reduce_noise)
-    3. De-reverb         (spectral subtraction via transient detection)
-    4. High-Pass Filter  (wraps noise_reduction.high_pass_filter)
-    5. Parametric EQ     (biquad cascaded EQ with presets)
-    6. Compressor        (RMS envelope, soft-knee, auto makeup)
-    7. De-Esser          (frequency-selective sibilance compressor)
-    8. Reverb            (Schroeder algorithmic / convolution IR)
-    9. Limiter           (real — brick-wall peak limiter)
+     1. Gain Rider       (RMS auto-leveling before compression)
+     2. De-Plosive       (dynamic low-freq transient filter)
+     3. Noise Gate       (RMS-envelope gating)
+     4. Spectral NR      (wraps noise_reduction.reduce_noise)
+     5. De-reverb        (spectral subtraction via transient detection)
+     6. High-Pass Filter (wraps noise_reduction.high_pass_filter)
+     7. Parametric EQ    (biquad cascaded EQ with presets)
+     8. Compressor Peak  (fast attack, high ratio — catches transient spikes)
+     9. Compressor Body  (slow attack, gentle ratio — smooths dynamics)
+    10. De-Esser         (frequency-selective sibilance compressor)
+    11. Soft Clipper      (waveshaping saturation for peak control)
+    12. Reverb           (Schroeder algorithmic / convolution IR)
+    13. Limiter          (brick-wall peak limiter)
 """
 
 import copy
@@ -20,18 +24,41 @@ import numpy as np
 
 # Processing chain order
 CHAIN_ORDER = [
+    "gain_rider",
+    "de_plosive",
     "noise_gate",
     "spectral_noise_reduction",
     "dereverb",
     "highpass_filter",
     "parametric_eq",
-    "compressor",
+    "compressor_peak",
+    "compressor_body",
     "de_esser",
+    "soft_clipper",
     "reverb",
     "limiter",
 ]
 
 DEFAULT_CONFIG = {
+    "gain_rider": {
+        "enabled": False,
+        "stub": False,
+        "target_rms_db": -20.0,
+        "window_ms": 300.0,
+        "max_gain_db": 6.0,
+        "max_cut_db": 6.0,
+        "smoothing_ms": 150.0,
+        "silence_threshold_db": -50.0,
+    },
+    "de_plosive": {
+        "enabled": False,
+        "stub": False,
+        "plosive_freq_hz": 200.0,
+        "threshold_db": -25.0,
+        "reduction_db": 10.0,
+        "attack_ms": 1.0,
+        "release_ms": 30.0,
+    },
     "noise_gate": {
         "enabled": False,
         "stub": False,
@@ -69,14 +96,25 @@ DEFAULT_CONFIG = {
         "preset": "bright",
         "bands": None,  # filled from EQ_PRESETS at import time (see below)
     },
-    "compressor": {
+    "compressor_peak": {
         "enabled": False,
         "stub": False,
-        "threshold_db": -18.0,
-        "ratio": 3.0,
-        "attack_ms": 15.0,
+        "threshold_db": -12.0,
+        "ratio": 8.0,
+        "attack_ms": 2.0,
+        "release_ms": 80.0,
+        "knee_db": 3.0,
+        "makeup_db": None,
+        "mix": 1.0,
+    },
+    "compressor_body": {
+        "enabled": False,
+        "stub": False,
+        "threshold_db": -20.0,
+        "ratio": 2.5,
+        "attack_ms": 20.0,
         "release_ms": 200.0,
-        "knee_db": 6.0,
+        "knee_db": 8.0,
         "makeup_db": None,
         "mix": 1.0,
     },
@@ -88,6 +126,13 @@ DEFAULT_CONFIG = {
         "threshold_db": -20.0,
         "reduction_db": 6.0,
         "mode": "split",
+    },
+    "soft_clipper": {
+        "enabled": False,
+        "stub": False,
+        "drive": 1.5,
+        "ceiling_db": -1.0,
+        "mode": "tanh",
     },
     "reverb": {
         "enabled": False,
@@ -111,26 +156,100 @@ DEFAULT_CONFIG = {
 PRESET_CONFIGS = {
     "Raw": {name: {"enabled": False} for name in CHAIN_ORDER},
     "Clean": {
+        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
+                        "max_cut_db": 6.0},
+        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
+                        "reduction_db": 10.0},
         "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
                         "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
         "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
         "dereverb": {"enabled": False},
         "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
         "parametric_eq": {"enabled": False},
-        "compressor": {"enabled": False},
+        "compressor_peak": {"enabled": False},
+        "compressor_body": {"enabled": False},
         "de_esser": {"enabled": False},
+        "soft_clipper": {"enabled": False},
         "reverb": {"enabled": False},
         "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
     "Enhanced": {
+        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
+                        "max_cut_db": 6.0},
+        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
+                        "reduction_db": 10.0},
         "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
                         "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
         "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
         "dereverb": {"enabled": True, "strength": 0.5},
         "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
         "parametric_eq": {"enabled": True, "preset": "bright"},
-        "compressor": {"enabled": True, "threshold_db": -18.0, "ratio": 3.0},
+        "compressor_peak": {"enabled": True, "threshold_db": -12.0, "ratio": 8.0,
+                             "attack_ms": 2.0, "release_ms": 80.0, "knee_db": 3.0},
+        "compressor_body": {"enabled": True, "threshold_db": -20.0, "ratio": 2.5,
+                             "attack_ms": 20.0, "release_ms": 200.0, "knee_db": 8.0},
         "de_esser": {"enabled": True, "freq_hz": 6000, "reduction_db": 6.0, "mode": "split"},
+        "soft_clipper": {"enabled": True, "drive": 1.5, "ceiling_db": -1.0, "mode": "tanh"},
+        "reverb": {"enabled": False},
+        "limiter": {"enabled": True, "ceiling_db": -0.7},
+    },
+    "Broadcast": {
+        "gain_rider": {"enabled": True, "target_rms_db": -18.0, "max_gain_db": 9.0,
+                        "max_cut_db": 9.0},
+        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
+                        "reduction_db": 12.0},
+        "noise_gate": {"enabled": True, "threshold_db": -32.0, "attack_ms": 1.5,
+                        "release_ms": 80.0, "hold_ms": 40.0, "reduction_db": -50.0},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.85, "mode": "auto"},
+        "dereverb": {"enabled": True, "strength": 0.6},
+        "highpass_filter": {"enabled": True, "cutoff_hz": 120.0},
+        "parametric_eq": {"enabled": True, "preset": "bright"},
+        "compressor_peak": {"enabled": True, "threshold_db": -10.0, "ratio": 10.0,
+                             "attack_ms": 1.0, "release_ms": 60.0, "knee_db": 2.0},
+        "compressor_body": {"enabled": True, "threshold_db": -18.0, "ratio": 3.0,
+                             "attack_ms": 15.0, "release_ms": 150.0, "knee_db": 6.0},
+        "de_esser": {"enabled": True, "freq_hz": 6000, "reduction_db": 8.0, "mode": "split"},
+        "soft_clipper": {"enabled": True, "drive": 2.0, "ceiling_db": -0.5, "mode": "tanh"},
+        "reverb": {"enabled": False},
+        "limiter": {"enabled": True, "ceiling_db": -0.5},
+    },
+    "Warm": {
+        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
+                        "max_cut_db": 6.0},
+        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
+                        "reduction_db": 10.0},
+        "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
+                        "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
+        "dereverb": {"enabled": True, "strength": 0.4},
+        "highpass_filter": {"enabled": True, "cutoff_hz": 80.0},
+        "parametric_eq": {"enabled": True, "preset": "warm"},
+        "compressor_peak": {"enabled": True, "threshold_db": -12.0, "ratio": 8.0,
+                             "attack_ms": 2.0, "release_ms": 80.0, "knee_db": 3.0},
+        "compressor_body": {"enabled": True, "threshold_db": -20.0, "ratio": 2.5,
+                             "attack_ms": 20.0, "release_ms": 200.0, "knee_db": 8.0},
+        "de_esser": {"enabled": True, "freq_hz": 6000, "reduction_db": 6.0, "mode": "split"},
+        "soft_clipper": {"enabled": True, "drive": 1.8, "ceiling_db": -1.0, "mode": "tanh"},
+        "reverb": {"enabled": False},
+        "limiter": {"enabled": True, "ceiling_db": -0.7},
+    },
+    "Bright": {
+        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
+                        "max_cut_db": 6.0},
+        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
+                        "reduction_db": 10.0},
+        "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
+                        "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
+        "dereverb": {"enabled": True, "strength": 0.5},
+        "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
+        "parametric_eq": {"enabled": True, "preset": "bright"},
+        "compressor_peak": {"enabled": True, "threshold_db": -12.0, "ratio": 8.0,
+                             "attack_ms": 2.0, "release_ms": 80.0, "knee_db": 3.0},
+        "compressor_body": {"enabled": True, "threshold_db": -20.0, "ratio": 2.5,
+                             "attack_ms": 20.0, "release_ms": 200.0, "knee_db": 8.0},
+        "de_esser": {"enabled": True, "freq_hz": 6000, "reduction_db": 6.0, "mode": "split"},
+        "soft_clipper": {"enabled": True, "drive": 1.3, "ceiling_db": -1.0, "mode": "tanh"},
         "reverb": {"enabled": False},
         "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
@@ -176,6 +295,180 @@ def _merge_config(defaults: dict, overrides: dict | None) -> dict:
 
 
 # --- Effect functions ---
+
+
+def gain_rider(data: np.ndarray, sr: int, **params) -> np.ndarray:
+    """Automatic gain riding — levels the signal before compression.
+
+    Measures RMS in overlapping windows, computes gain to reach target RMS,
+    clamps to a safe range, smooths transitions, and applies to signal.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        target_rms_db: Target RMS level each window is normalized toward.
+        window_ms: Analysis window size in ms.
+        max_gain_db: Maximum boost applied to quiet sections.
+        max_cut_db: Maximum cut applied to loud sections.
+        smoothing_ms: Gain transition smoothing in ms.
+        silence_threshold_db: Below this level, don't apply gain.
+
+    Returns:
+        Gain-ridden audio, same shape and dtype as input.
+    """
+    target_rms_db = params.get("target_rms_db", -20.0)
+    window_ms = params.get("window_ms", 300.0)
+    max_gain_db = params.get("max_gain_db", 6.0)
+    max_cut_db = params.get("max_cut_db", 6.0)
+    smoothing_ms = params.get("smoothing_ms", 150.0)
+    silence_threshold_db = params.get("silence_threshold_db", -50.0)
+
+    if data.size == 0:
+        return data
+
+    from scipy.interpolate import interp1d
+    from scipy.ndimage import uniform_filter1d
+
+    original_shape = data.shape
+
+    # Work on mono for envelope detection
+    if data.ndim == 1:
+        mono = data
+    else:
+        mono = data.mean(axis=1)
+
+    n_samples = len(mono)
+    window_samples = max(1, int(sr * window_ms / 1000))
+    hop = max(1, window_samples // 4)
+    silence_linear = 10.0 ** (silence_threshold_db / 20.0)
+    target_rms_linear = 10.0 ** (target_rms_db / 20.0)
+
+    # Compute windowed RMS
+    n_windows = max(1, (n_samples - window_samples) // hop + 1)
+    rms_values = np.zeros(n_windows, dtype=np.float64)
+    window_centers = np.zeros(n_windows, dtype=np.float64)
+
+    for i in range(n_windows):
+        start = i * hop
+        end = min(start + window_samples, n_samples)
+        window = mono[start:end]
+        rms_values[i] = np.sqrt(np.mean(window ** 2) + 1e-10)
+        window_centers[i] = start + window_samples // 2
+
+    # Compute gain for each window
+    gain_db = np.zeros(n_windows, dtype=np.float64)
+    for i in range(n_windows):
+        if rms_values[i] < silence_linear:
+            gain_db[i] = 0.0
+        else:
+            current_rms_db = 20.0 * np.log10(rms_values[i] + 1e-10)
+            desired_gain = target_rms_db - current_rms_db
+            gain_db[i] = np.clip(desired_gain, -max_cut_db, max_gain_db)
+
+    # Smooth the gain curve to avoid pumping
+    smooth_windows = max(1, int(smoothing_ms / (window_ms / 4)))
+    gain_db_smooth = uniform_filter1d(gain_db, size=smooth_windows)
+
+    # Interpolate to sample-level resolution
+    if n_windows == 1:
+        gain_per_sample = np.full(n_samples, gain_db_smooth[0], dtype=np.float64)
+    else:
+        window_centers = np.clip(window_centers, 0, n_samples - 1)
+        interp_func = interp1d(
+            window_centers, gain_db_smooth, kind="linear",
+            fill_value="extrapolate", bounds_error=False,
+        )
+        gain_per_sample = interp_func(np.arange(n_samples))
+
+    # Apply gain
+    gain_linear = (10.0 ** (gain_per_sample / 20.0)).astype(np.float32)
+
+    if data.ndim == 1:
+        result = data * gain_linear
+    else:
+        result = data * gain_linear[:, np.newaxis]
+
+    return result.astype(np.float32)
+
+
+def de_plosive(data: np.ndarray, sr: int, **params) -> np.ndarray:
+    """Dynamic de-plosive filter.
+
+    Detects low-frequency transient bursts (P, B, T consonants) and
+    temporarily applies gain reduction to the low band only during those
+    moments. Preserves vocal warmth during normal singing.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        plosive_freq_hz: Frequency below which plosive energy lives.
+        threshold_db: Detection threshold for plosive events.
+        reduction_db: How much to attenuate plosive energy.
+        attack_ms: How fast the de-plosive engages.
+        release_ms: How fast the de-plosive disengages.
+
+    Returns:
+        De-plosive filtered audio, same shape and dtype as input.
+    """
+    plosive_freq_hz = params.get("plosive_freq_hz", 200.0)
+    threshold_db = params.get("threshold_db", -25.0)
+    reduction_db = params.get("reduction_db", 10.0)
+    attack_ms = params.get("attack_ms", 1.0)
+    release_ms = params.get("release_ms", 30.0)
+
+    if data.size == 0:
+        return data
+
+    from scipy.signal import butter, sosfiltfilt
+
+    def _process_channel(signal: np.ndarray) -> np.ndarray:
+        n = len(signal)
+
+        # Extract low-frequency band for detection
+        nyq = sr / 2.0
+        freq = min(plosive_freq_hz, nyq - 1)
+        sos_lp = butter(4, freq, btype="low", fs=sr, output="sos")
+        low_band = sosfiltfilt(sos_lp, signal).astype(np.float32)
+
+        # Envelope of low band
+        envelope = np.abs(low_band).astype(np.float64)
+        smooth_samples = max(1, int(sr * 0.005))
+        kernel = np.ones(smooth_samples, dtype=np.float64) / smooth_samples
+        envelope = np.convolve(envelope, kernel, mode="same")
+
+        # Convert to dB
+        envelope_db = 20.0 * np.log10(envelope + 1e-10)
+
+        # Detect plosive events
+        is_plosive = envelope_db > threshold_db
+
+        # Create gain reduction for low band
+        gain_db = np.zeros(n, dtype=np.float64)
+        gain_db[is_plosive] = -reduction_db
+
+        # Smooth with attack/release
+        attack_coeff = np.exp(-1.0 / max(1, int(sr * attack_ms / 1000)))
+        release_coeff = np.exp(-1.0 / max(1, int(sr * release_ms / 1000)))
+        smoothed = np.zeros(n, dtype=np.float64)
+        for i in range(1, n):
+            if gain_db[i] < smoothed[i - 1]:
+                smoothed[i] = attack_coeff * smoothed[i - 1] + (1 - attack_coeff) * gain_db[i]
+            else:
+                smoothed[i] = release_coeff * smoothed[i - 1] + (1 - release_coeff) * gain_db[i]
+
+        gain_linear = (10.0 ** (smoothed / 20.0)).astype(np.float32)
+
+        # Apply gain reduction ONLY to the low band, add back the rest
+        high_band = signal - low_band
+        return (high_band + low_band * gain_linear).astype(np.float32)
+
+    if data.ndim == 1:
+        return _process_channel(data)
+
+    channels = []
+    for ch in range(data.shape[1]):
+        channels.append(_process_channel(data[:, ch]))
+    return np.column_stack(channels)
 
 
 def noise_gate(data: np.ndarray, sr: int, **params) -> np.ndarray:
@@ -702,6 +995,54 @@ def de_esser(data: np.ndarray, sr: int, **params) -> np.ndarray:
     return np.column_stack(channels)
 
 
+def soft_clipper(data: np.ndarray, sr: int, **params) -> np.ndarray:
+    """Soft clipping / saturation.
+
+    Gently rounds off peaks using a nonlinear waveshaping function.
+    Adds subtle harmonic warmth while taming transients.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        drive: Saturation amount, 1.0 = no effect, higher = more clipping.
+        ceiling_db: Output ceiling in dB, peaks above this get rounded.
+        mode: Waveshaping function — "tanh", "arctan", or "cubic".
+
+    Returns:
+        Soft-clipped audio, same shape and dtype as input.
+    """
+    drive = params.get("drive", 1.5)
+    ceiling_db = params.get("ceiling_db", -1.0)
+    mode = params.get("mode", "tanh")
+
+    if data.size == 0 or drive <= 1.0:
+        return data
+
+    ceiling_linear = 10.0 ** (ceiling_db / 20.0)
+
+    peak = np.max(np.abs(data))
+    if peak < 1e-10:
+        return data
+
+    # Scale so peaks are at drive level relative to ceiling
+    normalized = data * (drive / max(peak, ceiling_linear))
+
+    if mode == "tanh":
+        clipped = np.tanh(normalized) / np.tanh(drive)
+    elif mode == "arctan":
+        clipped = np.arctan(normalized) / np.arctan(drive)
+    elif mode == "cubic":
+        hard_clipped = np.clip(normalized / drive, -1, 1)
+        clipped = 1.5 * hard_clipped - 0.5 * hard_clipped ** 3
+    else:
+        clipped = normalized
+
+    # Scale back to original level, limited to ceiling
+    output = clipped * ceiling_linear
+
+    return output.astype(np.float32)
+
+
 def _comb_filter(signal: np.ndarray, delay: int, feedback: float) -> np.ndarray:
     """Schroeder comb filter: y[n] = x[n] + feedback * y[n - delay]."""
     out = np.zeros(len(signal), dtype=np.float64)
@@ -909,13 +1250,17 @@ def limiter(data: np.ndarray, sr: int, **params) -> np.ndarray:
 # --- Effect dispatch table ---
 
 _EFFECT_FUNCS = {
+    "gain_rider": gain_rider,
+    "de_plosive": de_plosive,
     "noise_gate": noise_gate,
     "spectral_noise_reduction": spectral_noise_reduction,
     "dereverb": dereverb,
     "highpass_filter": highpass_filter,
     "parametric_eq": parametric_eq,
-    "compressor": compressor,
+    "compressor_peak": compressor,
+    "compressor_body": compressor,
     "de_esser": de_esser,
+    "soft_clipper": soft_clipper,
     "reverb": reverb,
     "limiter": limiter,
 }

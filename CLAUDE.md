@@ -33,7 +33,7 @@ VocalForge/
 │   │   ├── __init__.py
 │   │   ├── engine.py           # Playback + recording streams (sounddevice)
 │   │   ├── alignment.py        # Cross-correlation alignment (constrained)
-│   │   ├── effects.py          # 9-stage vocal processing pipeline
+│   │   ├── effects.py          # 13-stage vocal processing pipeline
 │   │   ├── mixer.py            # LUFS normalization + mixing
 │   │   └── noise_reduction.py  # Spectral gating + high-pass filter
 │   ├── separation/
@@ -90,52 +90,7 @@ Audio is timing-critical. Follow these rules strictly:
 - Long operations → QThread + signals, never `QApplication.processEvents()` hacks
 - No QML — pure widgets (QMainWindow, QWidget, QVBoxLayout, etc.)
 
-## Key Technical Decisions
-
-### Alignment Algorithm
-
-Use **cross-correlation** (`numpy.correlate` or `scipy.signal.correlate` with `mode='full'`):
-1. Convert both tracks to mono if stereo
-2. Use the minus track as reference, vocal recording as target
-3. Find the lag at max correlation
-4. Shift the vocal recording by that lag (zero-pad or trim)
-
-For songs > 5 min, use FFT-based correlation (`scipy.signal.fftconvolve`) — O(n log n) vs O(n²).
-
-### LUFS Normalization
-
-Target: **-14 LUFS** (Spotify/YouTube standard) as default, user-adjustable.
-
-Workflow:
-1. Measure integrated loudness of minus track and vocal track separately
-2. Normalize both to target LUFS independently
-3. Apply mixing ratio (e.g., 0.7 vocal + 1.0 instrumental)
-4. Measure final mix loudness, apply final normalization to target
-
-### Demucs Integration
-
-- Use `htdemucs_ft` model (fine-tuned, best quality)
-- Run in a QThread — separation of a 4-min song takes ~30-60s on GPU, ~3-5 min on CPU
-- Show progress bar during separation
-- Cache separated stems alongside the original file (e.g., `song_stems/` directory)
-- Extract only the "no_vocals" (accompaniment) stem — discard drums/bass/other individual stems unless user wants them later
-
-### Recording Workflow State Machine
-
-```
-IDLE → [Start] → RECORDING → [Finish] → SAVE → PROCESSING → DONE
-                      ↓
-                   [Stop] → IDLE (discard recording)
-
-Alternative (loaded vocal):
-IDLE → [Load Vocal] → PROCESSING → DONE
-```
-
-- **IDLE:** minus track loaded, mic selected, ready
-- **RECORDING:** minus plays through output device, mic records to buffer
-- **SAVE:** raw recording auto-saved to disk as WAV (before any processing)
-- **PROCESSING:** alignment + normalization + mixing (automatic). Vocal source can be a live recording or a loaded file — pipeline is identical.
-- **DONE:** demo track ready, export button enabled
+See `docs/ARCHITECTURE.md` for stable design decisions (alignment, LUFS, Demucs, state machine).
 
 ## Phase Boundaries
 
@@ -146,10 +101,11 @@ Development follows PROJECT.md phases. Each phase is self-contained:
 - **Phase 7 (a–d):** Interactive alignment, multi-track preview, offset sliders, mono waveforms [DONE]
 - **Phase 8a:** Noise gate + de-reverb + preset system + UX improvements [DONE]
 - **Phase 8b:** Parametric EQ + compressor + NR mode selection (v0.3.1) [DONE]
-- **Phase 8c:** De-esser + reverb — completes all 9 vocal enhancers [DONE]
-- **Phase 10:** Auto-tune research & prototyping [v0.6.0]
-- **Phase 11:** Settings persistence, drag-and-drop, error handling [v0.5.0]
-- **Phase 12:** Testing, PyInstaller exe, README screenshots [v0.5.0]
+- **Phase 8c:** De-esser + reverb — completes 9-stage pipeline [DONE]
+- **Phase 8d:** Gain rider, de-plosive, serial compression, soft clipper — 13-stage pipeline [v0.5.0]
+- **Phase 11:** Settings persistence, drag-and-drop, error handling [v0.6.0]
+- **Phase 12:** Testing, PyInstaller exe, README screenshots [v0.7.0]
+- **Phase 10:** Auto-tune research & prototyping [v0.8.0]
 
 Do not pull in components from later phases.
 

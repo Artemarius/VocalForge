@@ -11,13 +11,16 @@ from vocalforge.audio.effects import (
     _merge_config,
     compressor,
     de_esser,
+    de_plosive,
     dereverb,
+    gain_rider,
     highpass_filter,
     limiter,
     noise_gate,
     parametric_eq,
     process_vocal,
     reverb,
+    soft_clipper,
     spectral_noise_reduction,
 )
 
@@ -33,6 +36,197 @@ def _make_loud_signal(duration_s=0.5, sr=SR):
     """Signal with peaks exceeding 1.0."""
     t = np.arange(int(sr * duration_s)) / sr
     return (2.0 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+
+# --- Gain Rider tests ---
+
+
+class TestGainRider:
+
+    def test_levels_dynamics(self):
+        """Gain rider should make loud+quiet sections more uniform in RMS."""
+        # Build signal: 0.5s loud, 0.5s quiet
+        loud = _make_tone(duration_s=0.5, amplitude=0.5)
+        quiet = _make_tone(duration_s=0.5, amplitude=0.05)
+        data = np.concatenate([loud, quiet])
+
+        result = gain_rider(data, SR, target_rms_db=-20.0, max_gain_db=6.0,
+                            max_cut_db=6.0, silence_threshold_db=-60.0)
+
+        # Measure RMS of first and second halves
+        n = len(data)
+        rms_first_in = np.sqrt(np.mean(data[:n // 2] ** 2))
+        rms_second_in = np.sqrt(np.mean(data[n // 2:] ** 2))
+        rms_first_out = np.sqrt(np.mean(result[:n // 2] ** 2))
+        rms_second_out = np.sqrt(np.mean(result[n // 2:] ** 2))
+
+        # Input ratio should be ~10:1, output ratio should be closer to 1:1
+        input_ratio = rms_first_in / max(rms_second_in, 1e-10)
+        output_ratio = rms_first_out / max(rms_second_out, 1e-10)
+        assert output_ratio < input_ratio, \
+            f"Gain rider should reduce dynamics ratio: {input_ratio:.1f} -> {output_ratio:.1f}"
+
+    def test_silence_not_boosted(self):
+        """Silence below threshold should not be boosted."""
+        data = np.full(SR, 1e-6, dtype=np.float32)
+        result = gain_rider(data, SR, silence_threshold_db=-50.0,
+                            max_gain_db=6.0)
+        # Output should not be louder than input
+        assert np.abs(result).max() <= np.abs(data).max() * 2.0
+
+    def test_preserves_shape_mono(self):
+        data = _make_tone(duration_s=0.5)
+        result = gain_rider(data, SR)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_preserves_shape_stereo(self):
+        mono = _make_tone(duration_s=0.5)
+        data = np.column_stack([mono, mono])
+        result = gain_rider(data, SR)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_empty_input(self):
+        data = np.array([], dtype=np.float32)
+        result = gain_rider(data, SR)
+        assert len(result) == 0
+
+    def test_finite_output(self):
+        data = _make_tone(duration_s=1.0, amplitude=0.5)
+        result = gain_rider(data, SR, max_gain_db=12.0)
+        assert np.all(np.isfinite(result))
+
+
+# --- De-Plosive tests ---
+
+
+def _make_plosive_signal(duration_s=0.5, sr=SR):
+    """Signal with a low-frequency transient burst simulating a plosive."""
+    n = int(sr * duration_s)
+    t = np.arange(n) / sr
+    # Normal singing at 300 Hz
+    singing = 0.2 * np.sin(2 * np.pi * 300 * t)
+    # Plosive burst: 80 Hz burst in first 20ms
+    burst_len = int(sr * 0.02)
+    burst = np.zeros(n, dtype=np.float32)
+    burst[:burst_len] = 0.8 * np.sin(2 * np.pi * 80 * t[:burst_len])
+    return (singing + burst).astype(np.float32)
+
+
+class TestDePlosive:
+
+    def test_attenuates_plosive_burst(self):
+        """Low-frequency energy in the burst region should be reduced."""
+        from scipy.signal import butter, sosfiltfilt
+        data = _make_plosive_signal()
+        result = de_plosive(data, SR, plosive_freq_hz=200,
+                            threshold_db=-30.0, reduction_db=10.0)
+        # Measure low-freq energy in first 30ms
+        burst_end = int(SR * 0.03)
+        sos = butter(4, 200, btype="low", fs=SR, output="sos")
+        low_before = np.sum(sosfiltfilt(sos, data[:burst_end]) ** 2)
+        low_after = np.sum(sosfiltfilt(sos, result[:burst_end]) ** 2)
+        assert low_after < low_before, \
+            f"Plosive energy should decrease: {low_before:.4f} -> {low_after:.4f}"
+
+    def test_preserves_non_plosive(self):
+        """Normal signal without plosives should pass through mostly unchanged."""
+        data = _make_tone(duration_s=0.5, freq=300, amplitude=0.2)
+        result = de_plosive(data, SR, threshold_db=-15.0, reduction_db=10.0)
+        corr = np.corrcoef(data, result)[0, 1]
+        assert corr > 0.95, f"Non-plosive signal damaged: correlation {corr}"
+
+    def test_preserves_shape_mono(self):
+        data = _make_plosive_signal()
+        result = de_plosive(data, SR)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_preserves_shape_stereo(self):
+        mono = _make_plosive_signal()
+        data = np.column_stack([mono, mono])
+        result = de_plosive(data, SR)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_empty_input(self):
+        data = np.array([], dtype=np.float32)
+        result = de_plosive(data, SR)
+        assert len(result) == 0
+
+    def test_finite_output(self):
+        data = _make_plosive_signal()
+        result = de_plosive(data, SR, reduction_db=15.0)
+        assert np.all(np.isfinite(result))
+
+
+# --- Soft Clipper tests ---
+
+
+class TestSoftClipper:
+
+    def test_reduces_peaks(self):
+        """Peaks should be lower after soft clipping."""
+        data = _make_loud_signal()
+        result = soft_clipper(data, SR, drive=2.0, ceiling_db=-1.0,
+                              mode="tanh")
+        ceiling_lin = 10.0 ** (-1.0 / 20.0)
+        assert np.abs(result).max() <= ceiling_lin + 1e-4, \
+            f"Peak {np.abs(result).max():.4f} exceeds ceiling {ceiling_lin:.4f}"
+
+    def test_drive_one_passthrough(self):
+        """Drive of 1.0 should return input unchanged."""
+        data = _make_tone(amplitude=0.5)
+        result = soft_clipper(data, SR, drive=1.0)
+        np.testing.assert_array_equal(result, data)
+
+    def test_tanh_mode(self):
+        data = _make_loud_signal()
+        result = soft_clipper(data, SR, drive=2.0, mode="tanh")
+        assert np.all(np.isfinite(result))
+        assert result.dtype == np.float32
+
+    def test_arctan_mode(self):
+        data = _make_loud_signal()
+        result = soft_clipper(data, SR, drive=2.0, mode="arctan")
+        assert np.all(np.isfinite(result))
+        assert result.dtype == np.float32
+
+    def test_cubic_mode(self):
+        data = _make_loud_signal()
+        result = soft_clipper(data, SR, drive=2.0, mode="cubic")
+        assert np.all(np.isfinite(result))
+        assert result.dtype == np.float32
+
+    def test_higher_drive_more_reduction(self):
+        """Higher drive should compress peaks more."""
+        data = _make_loud_signal()
+        low = soft_clipper(data, SR, drive=1.5, ceiling_db=-1.0)
+        high = soft_clipper(data, SR, drive=3.0, ceiling_db=-1.0)
+        # Higher drive: more waveform compression → lower peak-to-RMS ratio
+        ptr_low = np.abs(low).max() / np.sqrt(np.mean(low ** 2))
+        ptr_high = np.abs(high).max() / np.sqrt(np.mean(high ** 2))
+        assert ptr_high <= ptr_low + 0.1, \
+            f"Higher drive should reduce crest factor: {ptr_low:.2f} vs {ptr_high:.2f}"
+
+    def test_preserves_shape_mono(self):
+        data = _make_loud_signal()
+        result = soft_clipper(data, SR, drive=1.5)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_preserves_shape_stereo(self):
+        mono = _make_loud_signal()
+        data = np.column_stack([mono, mono])
+        result = soft_clipper(data, SR, drive=1.5)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_empty_input(self):
+        data = np.array([], dtype=np.float32)
+        result = soft_clipper(data, SR)
+        assert len(result) == 0
 
 
 # --- De-Esser tests ---
@@ -482,7 +676,7 @@ class TestCompressor:
 class TestPresets:
 
     def test_preset_definitions_valid(self):
-        """All presets must contain all 9 chain keys with an 'enabled' key."""
+        """All presets must contain all 13 chain keys with an 'enabled' key."""
         for name, preset in PRESET_CONFIGS.items():
             for chain_key in CHAIN_ORDER:
                 assert chain_key in preset, \
@@ -587,7 +781,7 @@ class TestProcessVocal:
         assert result.max() <= ceiling_lin + 1e-4
 
     def test_chain_order_count(self):
-        assert len(CHAIN_ORDER) == 9
+        assert len(CHAIN_ORDER) == 13
 
     def test_all_effects_in_dispatch(self):
         from vocalforge.audio.effects import _EFFECT_FUNCS
@@ -595,9 +789,13 @@ class TestProcessVocal:
             assert name in _EFFECT_FUNCS
 
     def test_full_chain_all_enabled(self):
-        """All 9 effects enabled should produce finite output with correct shape."""
+        """All 13 effects enabled should produce finite output with correct shape."""
         data = _make_tone(duration_s=2.0, amplitude=0.5)
         config = {
+            "gain_rider": {"enabled": True, "target_rms_db": -20.0,
+                           "max_gain_db": 6.0, "max_cut_db": 6.0},
+            "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0,
+                           "threshold_db": -25.0, "reduction_db": 10.0},
             "noise_gate": {"enabled": True, "threshold_db": -35.0,
                            "reduction_db": -40.0},
             "spectral_noise_reduction": {"enabled": True, "strength": 0.5,
@@ -606,10 +804,16 @@ class TestProcessVocal:
             "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
             "parametric_eq": {"enabled": True,
                               "bands": EQ_PRESETS["bright"]},
-            "compressor": {"enabled": True, "threshold_db": -18.0,
-                           "ratio": 3.0},
+            "compressor_peak": {"enabled": True, "threshold_db": -12.0,
+                                "ratio": 8.0, "attack_ms": 2.0,
+                                "release_ms": 80.0, "knee_db": 3.0},
+            "compressor_body": {"enabled": True, "threshold_db": -20.0,
+                                "ratio": 2.5, "attack_ms": 20.0,
+                                "release_ms": 200.0, "knee_db": 8.0},
             "de_esser": {"enabled": True, "freq_hz": 6000,
                          "reduction_db": 6.0, "mode": "split"},
+            "soft_clipper": {"enabled": True, "drive": 1.5,
+                             "ceiling_db": -1.0, "mode": "tanh"},
             "reverb": {"enabled": True, "wet_mix": 0.15, "decay": 0.7},
             "limiter": {"enabled": True, "ceiling_db": -0.7},
         }
@@ -619,23 +823,51 @@ class TestProcessVocal:
         assert np.all(np.isfinite(result))
 
     def test_eq_compressor_limiter_integration(self):
-        """EQ + compressor + limiter enabled together produce valid output."""
+        """EQ + serial compression + limiter enabled together produce valid output."""
         data = _make_loud_signal(duration_s=2.0)
         config = {name: {"enabled": False} for name in CHAIN_ORDER}
         config["parametric_eq"] = {
             "enabled": True,
             "bands": EQ_PRESETS["clean_up"],
         }
-        config["compressor"] = {
+        config["compressor_peak"] = {
             "enabled": True,
             "threshold_db": -12.0,
-            "ratio": 3.0,
+            "ratio": 8.0,
+        }
+        config["compressor_body"] = {
+            "enabled": True,
+            "threshold_db": -20.0,
+            "ratio": 2.5,
         }
         config["limiter"] = {"enabled": True, "ceiling_db": -1.0}
         result = process_vocal(data, SR, config=config)
         assert result.shape == data.shape
         assert result.dtype == np.float32
         assert np.all(np.isfinite(result))
+
+    def test_serial_compression_stages(self):
+        """Peak compressor (high threshold) and body compressor (low threshold) in series."""
+        data = _make_loud_signal(duration_s=1.0)
+        # Peak only
+        config_peak = {name: {"enabled": False} for name in CHAIN_ORDER}
+        config_peak["compressor_peak"] = {
+            "enabled": True, "threshold_db": -12.0, "ratio": 8.0,
+            "makeup_db": 0.0,
+        }
+        peak_only = process_vocal(data, SR, config=config_peak)
+        # Body only
+        config_body = {name: {"enabled": False} for name in CHAIN_ORDER}
+        config_body["compressor_body"] = {
+            "enabled": True, "threshold_db": -20.0, "ratio": 2.5,
+            "makeup_db": 0.0,
+        }
+        body_only = process_vocal(data, SR, config=config_body)
+        # Body has lower threshold → should compress more of the signal
+        peak_reduction = np.abs(data).max() - np.abs(peak_only).max()
+        body_reduction = np.abs(data).max() - np.abs(body_only).max()
+        assert body_reduction > 0, "Body compressor should reduce peaks"
+        assert peak_reduction > 0, "Peak compressor should reduce peaks"
 
 
 # --- Spectral Noise Reduction wrapper tests ---

@@ -16,74 +16,54 @@ All implementations use MIT/BSD-licensed libraries only (scipy, numpy, noiseredu
 Raw Recording
     │
     ▼
-┌──────────────────────────┐
-│  1. Gain Rider            │  Auto-level loud/quiet sections before anything else
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  1. Noise Gate       │  Remove silence gaps noise
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  2. De-Plosive            │  Remove P/B/T low-freq bursts
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  2. Noise Reduction  │  Remove stationary background noise
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  3. Noise Gate            │  Remove silence gaps noise
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  3. De-Reverb        │  Reduce room reverb (the "well" sound)
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  4. Noise Reduction       │  Remove stationary background noise
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  4. High-Pass Filter │  Cut rumble below vocal range
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  5. De-Reverb             │  Reduce room reverb (the "well" sound)
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  5. Parametric EQ    │  Shape tonal balance
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  6. High-Pass Filter      │  Cut rumble below vocal range
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  6. Compressor       │  Even out dynamics
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  7. Parametric EQ         │  Shape tonal balance
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  7. De-Esser         │  Tame sibilance (sss/shh sounds)
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  8. Compressor (Peak)     │  Fast attack, catch transient spikes
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  8. Reverb (optional)│  Add controlled, pleasant space
+└─────────┬───────────┘
           ▼
-┌──────────────────────────┐
-│  9. Compressor (Body)     │  Slow attack, smooth overall dynamics
-└─────────┬────────────────┘
-          ▼
-┌──────────────────────────┐
-│ 10. De-Esser              │  Tame sibilance (sss/shh sounds)
-└─────────┬────────────────┘
-          ▼
-┌──────────────────────────┐
-│ 11. Soft Clipper          │  Gently round remaining peaks (saturation)
-└─────────┬────────────────┘
-          ▼
-┌──────────────────────────┐
-│ 12. Reverb (optional)     │  Add controlled, pleasant space
-└─────────┬────────────────┘
-          ▼
-┌──────────────────────────┐
-│ 13. Limiter               │  Prevent clipping in final output
-└─────────┬────────────────┘
+┌─────────────────────┐
+│  9. Limiter          │  Prevent clipping in final output
+└─────────┬───────────┘
           ▼
     Enhanced Vocal
 ```
 
 ### Why This Order
 
-1. **Gain rider first** — levels the playing field before anything else. Reduces the dynamic range the compressor needs to handle. Without this, the compressor reacts to level differences between phrases rather than shaping dynamics within phrases.
-2. **De-plosive early** — plosive bursts are low-frequency transient spikes from P/B/T consonants. Removing them early prevents downstream processors (especially compressors) from reacting to non-musical energy.
-3. **Gate and noise reduction next** — clean the signal before any tonal shaping. EQ and compression amplify noise if you process a dirty signal.
-4. **De-reverb before EQ** — EQ after de-reverb avoids boosting reverb tails in the presence range.
-5. **High-pass before parametric EQ** — removes the mud before surgical shaping, so the EQ decisions are clearer.
-6. **EQ before compression** — shape the tone first, then even out the dynamics of the shaped signal. Compressing first would make EQ behave unpredictably (the compressor would react to frequencies you later remove).
-7. **Serial compression (peak then body)** — first compressor catches fast transient spikes (the visible peaks in the waveform), second compressor smooths overall dynamics and adds body. Two gentle stages is far more transparent than one aggressive stage.
-8. **De-esser after compression** — compression can increase sibilance (it brings up quiet sibilants to the same level as louder ones), so de-ess after.
-9. **Soft clipper after de-esser** — catches any remaining peaks that the compressors missed, rounds them gently with harmonic saturation rather than hard limiting. This is the "secret sauce" that professional mixes use for that smooth, even waveform.
-10. **Reverb after everything** — add space to the fully processed, clean vocal. Never apply reverb to a noisy or reverberant signal.
-11. **Limiter absolutely last** — safety net to prevent digital clipping in the final output.
+1. **Gate and noise reduction first** — clean the signal before any tonal shaping. EQ and compression amplify noise if you process a dirty signal.
+2. **De-reverb before EQ** — EQ after de-reverb avoids boosting reverb tails in the presence range.
+3. **High-pass before parametric EQ** — removes the mud before surgical shaping, so the EQ decisions are clearer.
+4. **EQ before compression** — shape the tone first, then even out the dynamics of the shaped signal. Compressing first would make EQ behave unpredictably (the compressor would react to frequencies you later remove).
+5. **Compressor before de-esser** — compression can increase sibilance (it brings up quiet sibilants to the same level as louder ones), so de-ess after.
+6. **Reverb after everything** — add space to the fully processed, clean vocal. Never apply reverb to a noisy or reverberant signal.
+7. **Limiter absolutely last** — safety net to prevent digital clipping in the final output.
 
 ---
 
@@ -102,179 +82,7 @@ Raw Recording
 
 ---
 
-## 1. Automatic Gain Rider (Pre-Compression Leveling)
-
-### Purpose
-The single most impactful technique for taming peak spikes. Before any compression, the gain rider automatically levels the signal by measuring RMS loudness in short windows and applying inverse gain — bringing loud sections down and quiet sections up. This produces a more uniform signal so downstream compressors don't have to work as hard and react more musically.
-
-This is the algorithmic equivalent of what mix engineers do manually with "clip gain" or "volume automation" — riding the fader in real time. The commercial plugin "Waves Vocal Rider" does exactly this and is considered an industry standard first step.
-
-### Algorithm
-1. Compute RMS loudness in overlapping windows (200-500 ms)
-2. Calculate the gain needed to bring each window's RMS to a target level
-3. Clamp the gain to a reasonable range (e.g., ±6 dB) to avoid over-boosting silence or crushing dynamics
-4. Smooth the gain curve with a slow follower to avoid audible pumping
-5. Apply the smoothed gain to the original signal
-
-### Parameters
-| Parameter | Range | Default | Description |
-|---|---|---|---|
-| `target_rms_db` | -30 to -12 | -20 | Target RMS level each window is normalized toward |
-| `window_ms` | 100 to 1000 | 300 | Analysis window size. Larger = smoother, less reactive |
-| `max_gain_db` | 0 to 12 | 6 | Maximum boost applied to quiet sections |
-| `max_cut_db` | 0 to 12 | 6 | Maximum cut applied to loud sections |
-| `smoothing_ms` | 50 to 500 | 150 | Gain transition smoothing. Prevents audible pumping |
-| `silence_threshold_db` | -80 to -40 | -50 | Below this level, don't apply gain (avoids boosting silence/noise) |
-
-### Implementation
-```python
-import numpy as np
-from scipy.interpolate import interp1d
-from scipy.ndimage import uniform_filter1d
-
-def gain_rider(audio, sr, target_rms_db=-20, window_ms=300, max_gain_db=6,
-               max_cut_db=6, smoothing_ms=150, silence_threshold_db=-50):
-    """
-    Automatic gain riding — levels the signal before compression.
-
-    Measures RMS in overlapping windows, computes gain to reach target RMS,
-    clamps to a safe range, smooths transitions, and applies to signal.
-
-    This should be the FIRST effect in the chain.
-    """
-    window_samples = int(sr * window_ms / 1000)
-    hop = window_samples // 4
-    silence_linear = 10 ** (silence_threshold_db / 20)
-    target_rms_linear = 10 ** (target_rms_db / 20)
-
-    # Compute windowed RMS
-    n_windows = (len(audio) - window_samples) // hop + 1
-    rms_values = np.zeros(n_windows)
-    window_centers = np.zeros(n_windows)
-
-    for i in range(n_windows):
-        start = i * hop
-        end = start + window_samples
-        window = audio[start:end]
-        rms = np.sqrt(np.mean(window ** 2) + 1e-10)
-        rms_values[i] = rms
-        window_centers[i] = start + window_samples // 2
-
-    # Compute gain for each window
-    gain_db = np.zeros(n_windows)
-    for i in range(n_windows):
-        if rms_values[i] < silence_linear:
-            gain_db[i] = 0.0  # Don't boost silence
-        else:
-            current_rms_db = 20 * np.log10(rms_values[i] + 1e-10)
-            desired_gain = target_rms_db - current_rms_db
-            # Clamp to safe range
-            gain_db[i] = np.clip(desired_gain, -max_cut_db, max_gain_db)
-
-    # Smooth the gain curve to avoid pumping
-    smooth_samples = max(1, int(smoothing_ms / (window_ms / 4)))  # in window units
-    gain_db_smooth = uniform_filter1d(gain_db, size=smooth_samples)
-
-    # Interpolate to sample-level resolution
-    interp_func = interp1d(window_centers, gain_db_smooth, kind='linear',
-                           fill_value='extrapolate', bounds_error=False)
-    gain_per_sample = interp_func(np.arange(len(audio)))
-
-    # Apply gain
-    gain_linear = 10 ** (gain_per_sample / 20)
-    return (audio * gain_linear).astype(np.float32)
-```
-
-### Tuning Tips
-- **window_ms = 300** is a good starting point — it corresponds roughly to the length of a syllable, so the gain rider follows the natural phrasing without reacting to individual notes
-- **max_gain_db = 6** limits how much quiet sections are boosted — going higher risks amplifying noise during breaths or quiet passages
-- The **silence_threshold** is critical — without it, the gain rider would boost room noise to target level during pauses
-- After gain riding, the waveform should look visually more consistent in Audacity — the tall spikes should be closer to the average level
-- This technique alone can reduce the peak-to-RMS ratio by 4-8 dB, which means the compressor needs to do half as much work
-
----
-
-## 2. De-Plosive Filter
-
-### Purpose
-Removes plosive bursts — the low-frequency "thump" from P, B, T consonants that the pop filter doesn't fully catch. These appear as tall spikes in the waveform, often at the start of words. Unlike a static high-pass filter (which permanently removes all low-frequency content), a de-plosive only engages when a low-frequency transient is detected, preserving the natural warmth of the voice the rest of the time.
-
-### Algorithm
-1. Extract the low-frequency energy (below 200-300 Hz) using a bandpass filter
-2. Compute the envelope of this low-frequency signal
-3. Detect when the envelope exceeds a threshold (plosive event)
-4. During plosive events, apply a temporary high-pass filter to reduce the burst
-5. Outside plosive events, pass signal unchanged
-
-### Parameters
-| Parameter | Range | Default | Description |
-|---|---|---|---|
-| `plosive_freq_hz` | 100 to 300 | 200 | Frequency below which plosive energy lives |
-| `threshold_db` | -40 to -10 | -25 | Detection threshold for plosive events |
-| `reduction_db` | 3 to 18 | 10 | How much to attenuate plosive energy |
-| `attack_ms` | 0.5 to 5 | 1 | How fast the de-plosive engages |
-| `release_ms` | 10 to 100 | 30 | How fast the de-plosive disengages |
-
-### Implementation
-```python
-from scipy.signal import butter, sosfiltfilt
-
-def de_plosive(audio, sr, plosive_freq_hz=200, threshold_db=-25,
-               reduction_db=10, attack_ms=1, release_ms=30):
-    """
-    Dynamic de-plosive filter.
-
-    Detects low-frequency transient bursts (P, B, T consonants) and
-    temporarily applies high-pass filtering only during those moments.
-    Preserves vocal warmth during normal singing.
-    """
-    # Extract low-frequency band for detection
-    sos_lp = butter(4, plosive_freq_hz, btype='low', fs=sr, output='sos')
-    low_band = sosfiltfilt(sos_lp, audio)
-
-    # Envelope of low band
-    envelope = np.abs(low_band)
-    smooth_samples = int(sr * 0.005)  # 5ms smoothing
-    kernel = np.ones(smooth_samples) / smooth_samples
-    envelope = np.convolve(envelope, kernel, mode='same')
-
-    # Convert to dB
-    envelope_db = 20 * np.log10(envelope + 1e-10)
-
-    # Detect plosive events
-    is_plosive = envelope_db > threshold_db
-
-    # Create gain reduction for low band
-    gain_db = np.zeros(len(audio))
-    gain_db[is_plosive] = -reduction_db
-
-    # Smooth with attack/release
-    attack_coeff = np.exp(-1.0 / (sr * attack_ms / 1000))
-    release_coeff = np.exp(-1.0 / (sr * release_ms / 1000))
-    smoothed = np.zeros_like(gain_db)
-    for i in range(1, len(gain_db)):
-        if gain_db[i] < smoothed[i-1]:
-            smoothed[i] = attack_coeff * smoothed[i-1] + (1 - attack_coeff) * gain_db[i]
-        else:
-            smoothed[i] = release_coeff * smoothed[i-1] + (1 - release_coeff) * gain_db[i]
-
-    gain_linear = 10 ** (smoothed / 20)
-
-    # Apply gain reduction ONLY to the low band, add back the rest
-    high_band = audio - low_band
-    return (high_band + low_band * gain_linear).astype(np.float32)
-```
-
-### Tuning Tips
-- Plosives are typically concentrated below 200 Hz with most energy around 80-150 Hz
-- The SM58 has a built-in presence peak and proximity effect — close-mic singing exaggerates plosives
-- If the de-plosive is removing too much of the vocal body, raise the threshold
-- This is a surgical tool — it should only activate a few times per song on the hardest P/B/T consonants
-- Check by looking at the waveform: tall narrow spikes at the start of words that are much louder than the singing are likely plosives
-
----
-
-## 3. Noise Gate
+## 1. Noise Gate
 
 ### Purpose
 Silences the signal during pauses between vocal phrases. Without gating, the mic picks up room tone, AC hum, breathing, and ambient noise during gaps. When mixed over a quiet instrumental passage, this noise becomes audible.
@@ -337,7 +145,7 @@ def noise_gate(audio, sr, threshold_db=-35, attack_ms=2, release_ms=100,
 
 ---
 
-## 4. Noise Reduction (Spectral Gating)
+## 2. Noise Reduction (Spectral Gating)
 
 ### Purpose
 Removes stationary background noise (hum, hiss, fan, computer noise) that persists even during singing. Unlike the noise gate which only helps during pauses, spectral gating removes noise that coexists with the vocal signal.
@@ -390,7 +198,7 @@ Consider adding a "Record Room Tone" button before the main recording starts —
 
 ---
 
-## 5. De-Reverb
+## 3. De-Reverb
 
 ### Purpose
 Reduces room reverb baked into the recording. This is the most impactful enhancement for the "well" problem. Room reverb is different from noise: it's not additive/stationary, but convolutive — each sound gets smeared by the room's impulse response, creating a wash that muddies clarity.
@@ -475,7 +283,7 @@ Same pattern as Demucs — run in a QThread, download model on first use, cache 
 
 ---
 
-## 6. High-Pass Filter (Low Cut)
+## 4. High-Pass Filter (Low Cut)
 
 ### Purpose
 Removes low-frequency content below the vocal range: rumble, foot stomps, AC vibration, handling noise, and the SM58's proximity effect (bass boost when singing close to the mic). This is almost universally applied to vocals and there's rarely a reason to skip it.
@@ -512,7 +320,7 @@ def highpass_filter(audio, sr, cutoff_hz=100, order=4):
 
 ---
 
-## 7. Parametric EQ
+## 5. Parametric EQ
 
 ### Purpose
 Shapes the tonal balance of the voice. Every voice has different problem areas: room modes that create muddiness, nasal resonances, lack of clarity or brightness. EQ is where you fix these and make the voice sound polished.
@@ -665,131 +473,130 @@ bright_bands = [
 
 ---
 
-## 8. Compressor — Stage 1: Peak Tamer
+## 6. Compressor
 
 ### Purpose
-The first compressor in a serial pair. Its job is to catch fast transient spikes — the tall peaks visible in the waveform that poke above the average level. It acts almost like a limiter with a fast attack, shaving 3-6 dB off only the loudest moments. This is the main weapon against the peak spikes visible in your Audacity screenshot.
+Reduces dynamic range — makes quiet parts louder and loud parts quieter. Without compression, some words disappear into the backing track while others jump out too loudly. Compression makes the vocal level consistent and "present" throughout the song.
 
-### Parameters (Peak Tamer Defaults)
+### Algorithm
+1. Compute the signal envelope (RMS in short windows)
+2. Convert to dB
+3. Apply gain reduction curve: above the threshold, reduce gain by the ratio
+4. Smooth the gain reduction with attack/release envelope
+5. Apply the computed gain to the original signal
+6. Add makeup gain to restore overall level
+
+### Parameters
 | Parameter | Range | Default | Description |
 |---|---|---|---|
-| `threshold_db` | -20 to -6 | -12 | Set high — should only catch the tallest peaks |
-| `ratio` | 6 to 20 | 8.0 | High ratio — aggressive peak control |
-| `attack_ms` | 0.5 to 5 | 2 | Very fast attack to catch transients |
-| `release_ms` | 30 to 150 | 80 | Medium-fast release to recover quickly |
-| `makeup_db` | 0 to 6 | auto | Compensate for gain reduction |
-| `knee_db` | 0 to 6 | 3 | Moderate knee for natural transition |
-
-### How It Differs From The Body Compressor
-The peak tamer has a **fast attack** (catches the spike before it passes), **high ratio** (aggressively reduces it), and **high threshold** (only engages on the loudest peaks). It should be doing **2-4 dB of gain reduction** only on the tallest peaks, and **0 dB** on normal singing. If it's compressing continuously, the threshold is too low.
-
----
-
-## 9. Compressor — Stage 2: Body Smoother
-
-### Purpose
-The second compressor in the serial pair. After the peak tamer has shaved off the tallest spikes, the body smoother evens out the overall dynamics with gentle, musical compression. It adds consistency, warmth, and "presence" to the vocal — making it sound polished and professional.
-
-### Parameters (Body Smoother Defaults)
-| Parameter | Range | Default | Description |
-|---|---|---|---|
-| `threshold_db` | -30 to -12 | -20 | Set lower — should compress most of the singing |
-| `ratio` | 1.5 to 4 | 2.5 | Gentle ratio — subtle smoothing |
-| `attack_ms` | 10 to 40 | 20 | Slow attack — lets the natural attack of words through |
-| `release_ms` | 100 to 400 | 200 | Slow release — smooth, non-pumping |
-| `makeup_db` | 0 to 10 | auto | Compensate for gain reduction |
-| `knee_db` | 3 to 12 | 8 | Soft knee for very gradual, transparent compression |
-
-### Serial Compression: Why Two Stages
-
-Using two compressors with moderate settings instead of one aggressive compressor produces dramatically better results:
-
-- **Single aggressive compressor** (ratio 8:1, threshold -18 dB): catches peaks AND smooths body with the same settings. The fast attack needed for peaks kills the natural attack of normal singing. The result sounds "squashed" and lifeless.
-
-- **Two gentle compressors** (peak: 8:1 fast @ -12 dB, body: 2.5:1 slow @ -20 dB): the peak tamer only touches the spikes. The body smoother only gently smooths the rest. Each compressor does 2-4 dB of work instead of one doing 8-12 dB. The result sounds natural and controlled.
+| `threshold_db` | -40 to 0 | -18 | Level above which compression starts |
+| `ratio` | 1.0 to 20.0 | 3.0 | Compression ratio. 3:1 = gentle, 8:1+ = aggressive |
+| `attack_ms` | 0.1 to 100 | 15 | How fast the compressor reacts to loud signals |
+| `release_ms` | 10 to 1000 | 200 | How fast the compressor stops compressing after signal drops |
+| `makeup_db` | 0 to 20 | auto | Gain added after compression to restore volume |
+| `knee_db` | 0 to 12 | 6 | Soft knee width. 0 = hard knee, 6+ = gradual transition |
 
 ### Implementation
-Use the same `compressor()` function from the original doc, called twice with different parameters:
-
 ```python
-def serial_compress(audio, sr,
-                    # Stage 1: Peak Tamer
-                    peak_threshold_db=-12, peak_ratio=8.0,
-                    peak_attack_ms=2, peak_release_ms=80,
-                    # Stage 2: Body Smoother
-                    body_threshold_db=-20, body_ratio=2.5,
-                    body_attack_ms=20, body_release_ms=200):
+def compressor(audio, sr, threshold_db=-18, ratio=3.0, attack_ms=15,
+               release_ms=200, makeup_db=None, knee_db=6):
     """
-    Serial compression: two compressors in series.
+    Dynamic range compressor.
 
-    Stage 1 (peak tamer): fast attack, high ratio, high threshold.
-    Only catches the tallest transient spikes. 2-4 dB reduction on peaks.
-
-    Stage 2 (body smoother): slow attack, gentle ratio, lower threshold.
-    Smooths overall dynamics and adds body. 2-4 dB average reduction.
+    Uses RMS envelope detection with exponential attack/release smoothing.
+    Soft knee for more natural compression.
     """
-    # Stage 1: catch peaks
-    stage1 = compressor(audio, sr,
-                        threshold_db=peak_threshold_db,
-                        ratio=peak_ratio,
-                        attack_ms=peak_attack_ms,
-                        release_ms=peak_release_ms,
-                        knee_db=3)
+    # Envelope detection
+    window_samples = int(sr * 0.01)  # 10ms RMS window
+    hop = window_samples // 2
 
-    # Stage 2: smooth body
-    stage2 = compressor(stage1, sr,
-                        threshold_db=body_threshold_db,
-                        ratio=body_ratio,
-                        attack_ms=body_attack_ms,
-                        release_ms=body_release_ms,
-                        knee_db=8)
+    # Compute RMS envelope (block-based, then interpolate to sample rate)
+    n_blocks = len(audio) // hop
+    rms_db = np.zeros(n_blocks)
+    for i in range(n_blocks):
+        start = i * hop
+        end = min(start + window_samples, len(audio))
+        block_rms = np.sqrt(np.mean(audio[start:end] ** 2) + 1e-10)
+        rms_db[i] = 20 * np.log10(block_rms + 1e-10)
 
-    return stage2
+    # Gain computation with soft knee
+    gain_db = np.zeros_like(rms_db)
+    for i in range(len(rms_db)):
+        level = rms_db[i]
+        if knee_db > 0:
+            # Soft knee
+            knee_start = threshold_db - knee_db / 2
+            knee_end = threshold_db + knee_db / 2
+            if level < knee_start:
+                gain_db[i] = 0  # no compression
+            elif level > knee_end:
+                gain_db[i] = (threshold_db - level) * (1 - 1/ratio)
+            else:
+                # Quadratic interpolation in knee region
+                x = level - knee_start
+                gain_db[i] = ((1/ratio - 1) * x * x) / (2 * knee_db)
+        else:
+            # Hard knee
+            if level > threshold_db:
+                gain_db[i] = (threshold_db - level) * (1 - 1/ratio)
+
+    # Attack/release smoothing
+    attack_coeff = np.exp(-1.0 / (sr / hop * attack_ms / 1000))
+    release_coeff = np.exp(-1.0 / (sr / hop * release_ms / 1000))
+
+    smoothed = np.zeros_like(gain_db)
+    smoothed[0] = gain_db[0]
+    for i in range(1, len(gain_db)):
+        if gain_db[i] < smoothed[i-1]:  # gain decreasing = attacking
+            smoothed[i] = attack_coeff * smoothed[i-1] + (1 - attack_coeff) * gain_db[i]
+        else:  # gain increasing = releasing
+            smoothed[i] = release_coeff * smoothed[i-1] + (1 - release_coeff) * gain_db[i]
+
+    # Interpolate gain envelope to sample rate
+    from scipy.interpolate import interp1d
+    time_blocks = np.arange(len(smoothed)) * hop
+    interp_func = interp1d(time_blocks, smoothed, kind='linear',
+                           fill_value='extrapolate')
+    gain_sample = interp_func(np.arange(len(audio)))
+
+    # Apply gain
+    gain_linear = 10 ** (gain_sample / 20)
+    output = audio * gain_linear
+
+    # Auto makeup gain: compensate for average gain reduction
+    if makeup_db is None:
+        avg_reduction = np.mean(smoothed)
+        makeup_db = -avg_reduction * 0.7  # compensate ~70% of average reduction
+    output *= 10 ** (makeup_db / 20)
+
+    return output.astype(np.float32)
 ```
 
-### Parallel Compression (Advanced Alternative)
+### Parallel Compression (Advanced)
 
-For an even more natural sound, the body smoother can be run in parallel:
+For a more natural, "thick" vocal sound, mix the compressed signal with the original:
 
 ```python
-def serial_parallel_compress(audio, sr, parallel_mix=0.6, **kwargs):
+def parallel_compress(audio, sr, mix=0.6, **compressor_kwargs):
     """
-    Stage 1 (serial peak tamer) + Stage 2 (parallel body smoother).
-    Preserves natural dynamics while adding body.
+    Parallel (NY-style) compression.
+    mix: 0.0 = all dry, 1.0 = all compressed. 0.5-0.7 is typical.
     """
-    # Stage 1: always serial (catch peaks)
-    peak_tamed = compressor(audio, sr,
-                            threshold_db=kwargs.get('peak_threshold_db', -12),
-                            ratio=kwargs.get('peak_ratio', 8.0),
-                            attack_ms=kwargs.get('peak_attack_ms', 2),
-                            release_ms=kwargs.get('peak_release_ms', 80),
-                            knee_db=3)
-
-    # Stage 2: parallel (smooth body)
-    body_compressed = compressor(peak_tamed, sr,
-                                threshold_db=kwargs.get('body_threshold_db', -20),
-                                ratio=kwargs.get('body_ratio', 2.5),
-                                attack_ms=kwargs.get('body_attack_ms', 20),
-                                release_ms=kwargs.get('body_release_ms', 200),
-                                knee_db=8)
-
-    # Mix dry (peak-tamed) with compressed body
-    return ((1 - parallel_mix) * peak_tamed + parallel_mix * body_compressed).astype(np.float32)
+    compressed = compressor(audio, sr, **compressor_kwargs)
+    return ((1 - mix) * audio + mix * compressed).astype(np.float32)
 ```
+
+This preserves natural dynamics (from the dry signal) while adding body and consistency (from the compressed signal). Use this instead of regular compression if the regular compressor sounds too "squashed."
 
 ### Tuning Tips
-- **Check gain reduction meters:** Stage 1 should show 0 dB most of the time, with occasional 3-6 dB dips on peaks. Stage 2 should show constant 1-4 dB reduction.
-- If Stage 1 is compressing continuously, raise its threshold
-- If the vocal still sounds uneven after both stages, lower Stage 2's threshold by 2-3 dB
-- **The order matters:** peak tamer MUST come first. If the body smoother comes first, it would lower the average level, making the peak tamer's threshold harder to set
-
-### Compressor Core Implementation (Used by Both Stages)
-
-The `compressor()` function below is the core engine used by both Stage 1 (peak tamer) and Stage 2 (body smoother), called with different parameters each time.
+- **Attack time is critical for vocals.** Too fast (< 5 ms) kills the natural attack of consonants, making singing sound dull. Too slow (> 50 ms) lets transients through uncontrolled. 10-20 ms is the sweet spot for singing.
+- **Ratio 3:1** is the standard starting point for vocal compression. Only go higher (6:1+) if you want a deliberately compressed, "radio" sound.
+- **Listen for "pumping"** — a rhythmic volume swell that follows the compression. It means the release is too fast. Increase release_ms.
+- **2-6 dB of gain reduction** is typical. If you're seeing 10+ dB, the threshold is too low.
 
 ---
 
-## 10. De-Esser
+## 7. De-Esser
 
 ### Purpose
 Tames sibilance — the harsh "sss", "shh", "tch", "f" sounds that become piercing in recordings. The SM58 is not particularly bright, but EQ presence boosts (step 5) and compression (step 6) can both increase sibilance. The de-esser catches it after those steps.
@@ -876,83 +683,7 @@ def de_esser(audio, sr, freq_hz=6000, bandwidth_hz=4000, threshold_db=-20,
 
 ---
 
-## 11. Soft Clipper (Saturation)
-
-### Purpose
-The "secret weapon" for taming remaining peaks. After serial compression and de-essing, there may still be occasional transient spikes that poke above the average level. Instead of using another compressor (which has attack time and can introduce pumping), a soft clipper reshapes the peaks using a nonlinear waveshaping function — it gently rounds them off and adds subtle harmonic warmth.
-
-This is what gives professional mixes that smooth, "filled in" waveform you see in the separated original vocal track. The soft clipper operates instantaneously (no attack/release) and introduces pleasant even-harmonic distortion rather than harsh digital clipping.
-
-### Algorithm
-Apply a nonlinear transfer function to the signal. The classic is `tanh` (hyperbolic tangent), which passes quiet signals unchanged but smoothly compresses peaks approaching the ceiling. Other options include polynomial waveshaping and the arctangent function.
-
-### Parameters
-| Parameter | Range | Default | Description |
-|---|---|---|---|
-| `drive` | 1.0 to 4.0 | 1.5 | How much to push into saturation. 1.0 = no effect. Higher = more clipping |
-| `ceiling_db` | -3 to 0 | -1.0 | Output ceiling. Peaks above this get rounded |
-| `mode` | tanh/arctan/cubic | tanh | Waveshaping function. tanh = warmest, cubic = most transparent |
-
-### Implementation
-```python
-def soft_clipper(audio, sr, drive=1.5, ceiling_db=-1.0, mode='tanh'):
-    """
-    Soft clipping / saturation.
-
-    Gently rounds off peaks using a nonlinear waveshaping function.
-    Adds subtle harmonic warmth while taming transients.
-
-    drive: 1.0 = no effect. 1.5 = subtle warmth. 2.0+ = noticeable saturation.
-    mode:
-      - 'tanh': classic tube-like warmth (smooth, even harmonics)
-      - 'arctan': slightly brighter saturation
-      - 'cubic': f(x) = 1.5x - 0.5x³, most transparent, minimal coloring
-    """
-    ceiling_linear = 10 ** (ceiling_db / 20)
-
-    # Normalize to ceiling before clipping
-    peak = np.max(np.abs(audio))
-    if peak < 1e-10:
-        return audio
-
-    # Scale so peaks are at drive level relative to ceiling
-    normalized = audio * (drive / max(peak, ceiling_linear))
-
-    if mode == 'tanh':
-        # tanh soft clip — warmest, most musical
-        clipped = np.tanh(normalized) / np.tanh(drive)
-    elif mode == 'arctan':
-        # arctan soft clip — brighter character
-        clipped = np.arctan(normalized) / np.arctan(drive)
-    elif mode == 'cubic':
-        # Polynomial: f(x) = 1.5x - 0.5x³, hard clip at ±1 first
-        hard_clipped = np.clip(normalized / drive, -1, 1)
-        clipped = 1.5 * hard_clipped - 0.5 * hard_clipped ** 3
-    else:
-        clipped = normalized
-
-    # Scale back to original level, limited to ceiling
-    output = clipped * ceiling_linear
-
-    return output.astype(np.float32)
-```
-
-### Tuning Tips
-- **Start with drive = 1.2-1.5** — this is the subtle range where you get peak control without audible distortion. The effect should be invisible — you shouldn't "hear" saturation, just notice the waveform is smoother
-- **drive above 2.0** introduces audible warmth/saturation — use this intentionally for a "warmer" sound, not for transparent peak control
-- **tanh mode** is the most forgiving and is the standard in analog emulations. It adds mostly 2nd and 3rd harmonics (musically pleasant)
-- **The cubic polynomial** (`1.5x - 0.5x³`) is mathematically chosen so its derivative is zero at the clipping points — this means the transition from linear to clipped is completely smooth with no kink
-- **Use before the limiter** — the soft clipper handles 1-3 dB of peak reduction gently. The limiter behind it only needs to catch the rare remaining overshoot
-- In Audacity, A/B the waveform before and after: the peaks should be visibly shorter while the average level stays the same. This is exactly the difference you see between your recording and the professional separated vocal
-
-### Soft Clipper vs Limiter
-Why use both? They complement each other:
-- **Soft clipper** (step 11): reshapes peaks musically with harmonic saturation. Works instantaneously. Adds warmth. Handles the bulk of peak reduction (1-3 dB).
-- **Limiter** (step 13): hard safety net with lookahead. Prevents any signal from exceeding 0 dBFS. Should barely engage if the soft clipper did its job. No coloring, just protection.
-
----
-
-## 12. Reverb (Controlled, Optional)
+## 8. Reverb (Controlled, Optional)
 
 ### Purpose
 After removing the room's natural (bad) reverb in step 3, the vocal may sound unnaturally dry and close — like the singer is inside your head. Adding a small amount of controlled, pleasant reverb places the voice in a nice acoustic space while keeping it clear.
@@ -1077,7 +808,7 @@ def schroeder_reverb(audio, sr, decay=0.7, wet_mix=0.15, predelay_ms=25):
 
 ---
 
-## 13. Limiter
+## 9. Limiter
 
 ### Purpose
 Safety net at the end of the chain. After all the processing — especially compression makeup gain, EQ boosts, and reverb — the signal may occasionally exceed 0 dBFS (digital full scale), causing clipping distortion. The limiter catches these peaks.
@@ -1142,7 +873,7 @@ def limiter(audio, sr, ceiling_db=-0.5, release_ms=50):
 ```python
 def process_vocal(audio, sr, config=None):
     """
-    Apply the full vocal enhancement chain (13 steps).
+    Apply the full vocal enhancement chain.
 
     config: dict with per-effect parameters. If None, uses defaults.
     Returns: processed numpy float32 array.
@@ -1152,31 +883,23 @@ def process_vocal(audio, sr, config=None):
 
     result = audio.copy()
 
-    # 1. Gain Rider (pre-compression leveling)
-    if config.get('gain_rider_enabled', True):
-        result = gain_rider(result, sr, **config.get('gain_rider', {}))
-
-    # 2. De-Plosive
-    if config.get('deplosive_enabled', True):
-        result = de_plosive(result, sr, **config.get('deplosive', {}))
-
-    # 3. Noise Gate
+    # 1. Noise Gate
     if config.get('gate_enabled', True):
         result = noise_gate(result, sr, **config.get('gate', {}))
 
-    # 4. Noise Reduction
+    # 2. Noise Reduction
     if config.get('noise_reduction_enabled', True):
         result = reduce_noise(result, sr, **config.get('noise_reduction', {}))
 
-    # 5. De-Reverb
+    # 3. De-Reverb
     if config.get('dereverb_enabled', True):
         result = dereverb_spectral(result, sr, **config.get('dereverb', {}))
 
-    # 6. High-Pass Filter
+    # 4. High-Pass Filter
     if config.get('highpass_enabled', True):
         result = highpass_filter(result, sr, **config.get('highpass', {}))
 
-    # 7. Parametric EQ
+    # 5. Parametric EQ
     if config.get('eq_enabled', True):
         bands = config.get('eq_bands', [
             {'freq_hz': 250,   'gain_db': -2.5, 'q': 0.8, 'type': 'peak'},
@@ -1185,43 +908,23 @@ def process_vocal(audio, sr, config=None):
         ])
         result = parametric_eq(result, sr, bands)
 
-    # 8. Compressor Stage 1: Peak Tamer
-    if config.get('peak_compressor_enabled', True):
-        peak_cfg = config.get('peak_compressor', {})
-        result = compressor(result, sr,
-                            threshold_db=peak_cfg.get('threshold_db', -12),
-                            ratio=peak_cfg.get('ratio', 8.0),
-                            attack_ms=peak_cfg.get('attack_ms', 2),
-                            release_ms=peak_cfg.get('release_ms', 80),
-                            knee_db=peak_cfg.get('knee_db', 3))
+    # 6. Compressor
+    if config.get('compressor_enabled', True):
+        result = compressor(result, sr, **config.get('compressor', {}))
 
-    # 9. Compressor Stage 2: Body Smoother
-    if config.get('body_compressor_enabled', True):
-        body_cfg = config.get('body_compressor', {})
-        result = compressor(result, sr,
-                            threshold_db=body_cfg.get('threshold_db', -20),
-                            ratio=body_cfg.get('ratio', 2.5),
-                            attack_ms=body_cfg.get('attack_ms', 20),
-                            release_ms=body_cfg.get('release_ms', 200),
-                            knee_db=body_cfg.get('knee_db', 8))
-
-    # 10. De-Esser
+    # 7. De-Esser
     if config.get('deesser_enabled', True):
         result = de_esser(result, sr, **config.get('deesser', {}))
 
-    # 11. Soft Clipper
-    if config.get('soft_clipper_enabled', True):
-        result = soft_clipper(result, sr, **config.get('soft_clipper', {}))
-
-    # 12. Reverb (off by default)
-    if config.get('reverb_enabled', False):
+    # 8. Reverb
+    if config.get('reverb_enabled', False):  # off by default
         reverb_cfg = config.get('reverb', {})
         if 'ir_path' in reverb_cfg:
             result = convolution_reverb(result, sr, **reverb_cfg)
         else:
             result = schroeder_reverb(result, sr, **reverb_cfg)
 
-    # 13. Limiter (always on)
+    # 9. Limiter (always on)
     result = limiter(result, sr, **config.get('limiter', {}))
 
     return result
@@ -1234,11 +937,10 @@ For VocalForge, expose these as simple preset buttons rather than making the use
 | Preset | Description | What It Enables |
 |---|---|---|
 | **Raw** | No processing | Everything disabled |
-| **Clean** | Basic cleanup only | Gain Rider + De-Plosive + Gate + Noise Reduction + HPF |
+| **Clean** | Basic cleanup only | Gate + Noise Reduction + HPF |
 | **Enhanced** | Full chain, moderate settings | All effects, conservative defaults |
 | **Bright** | Full chain with brightness boost | All effects, bright EQ preset |
-| **Warm** | Full chain with warmth + saturation | All effects, warm EQ, soft clipper drive=1.8 |
-| **Broadcast** | Maximum consistency, radio-like | All effects, aggressive gain rider, tight serial compression |
+| **Warm** | Full chain with warmth emphasis | All effects, warm EQ preset |
 | **Custom** | User controls all parameters | All effects, sliders exposed |
 
 The majority of use will be "Enhanced" — it should sound good without any user intervention.

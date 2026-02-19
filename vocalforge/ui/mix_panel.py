@@ -257,13 +257,54 @@ class MixPanel(QWidget):
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Preset:"))
         self._preset_combo = QComboBox()
-        self._preset_combo.addItems(["Custom", "Raw", "Clean", "Enhanced"])
+        self._preset_combo.addItems(["Custom", "Raw", "Clean", "Enhanced",
+                                         "Broadcast", "Warm", "Bright"])
         preset_row.addWidget(self._preset_combo, stretch=1)
         preset_row.addStretch()
         ecl.addLayout(preset_row)
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
 
-        # 1. Noise Gate (working)
+        # 1. Gain Rider
+        gr_target_spin = QSpinBox()
+        gr_target_spin.setRange(-30, -12)
+        gr_target_spin.setValue(-20)
+        gr_target_spin.setSuffix(" dB")
+        gr_target_spin.setToolTip("Target RMS level for gain riding")
+        gr_max_gain_spin = QSpinBox()
+        gr_max_gain_spin.setRange(0, 12)
+        gr_max_gain_spin.setValue(6)
+        gr_max_gain_spin.setSuffix(" dB")
+        gr_max_gain_spin.setToolTip("Maximum boost for quiet sections")
+        self._add_effect_row(ecl, "gain_rider", "Gain Rider",
+                             stub=False,
+                             controls=[gr_target_spin, gr_max_gain_spin])
+        self._effect_controls["gain_rider"] = {
+            "target_spin": gr_target_spin,
+            "max_gain_spin": gr_max_gain_spin,
+        }
+        self._effect_checkboxes["gain_rider"].setChecked(False)
+
+        # 2. De-Plosive
+        dp_thresh_spin = QSpinBox()
+        dp_thresh_spin.setRange(-40, -10)
+        dp_thresh_spin.setValue(-25)
+        dp_thresh_spin.setSuffix(" dB")
+        dp_thresh_spin.setToolTip("Detection threshold for plosive events")
+        dp_reduction_spin = QSpinBox()
+        dp_reduction_spin.setRange(3, 18)
+        dp_reduction_spin.setValue(10)
+        dp_reduction_spin.setSuffix(" dB")
+        dp_reduction_spin.setToolTip("Attenuation applied to plosive energy")
+        self._add_effect_row(ecl, "de_plosive", "De-Plosive",
+                             stub=False,
+                             controls=[dp_thresh_spin, dp_reduction_spin])
+        self._effect_controls["de_plosive"] = {
+            "threshold_spin": dp_thresh_spin,
+            "reduction_spin": dp_reduction_spin,
+        }
+        self._effect_checkboxes["de_plosive"].setChecked(False)
+
+        # 3. Noise Gate
         gate_thresh_spin = QSpinBox()
         gate_thresh_spin.setRange(-60, -20)
         gate_thresh_spin.setValue(-35)
@@ -339,26 +380,47 @@ class MixPanel(QWidget):
         self._effect_controls["parametric_eq"] = {"combo": eq_combo}
         self._effect_checkboxes["parametric_eq"].setChecked(False)
 
-        # 6. Compressor (working)
-        comp_thresh_spin = QSpinBox()
-        comp_thresh_spin.setRange(-40, 0)
-        comp_thresh_spin.setValue(-18)
-        comp_thresh_spin.setSuffix(" dB")
-        comp_thresh_spin.setToolTip("Threshold above which compression starts")
-        comp_ratio_spin = QDoubleSpinBox()
-        comp_ratio_spin.setRange(1.0, 20.0)
-        comp_ratio_spin.setValue(3.0)
-        comp_ratio_spin.setSingleStep(0.5)
-        comp_ratio_spin.setSuffix(":1")
-        comp_ratio_spin.setToolTip("Compression ratio")
-        self._add_effect_row(ecl, "compressor", "Compressor",
+        # 8. Compressor Peak (fast attack, catches transient spikes)
+        cpeak_thresh_spin = QSpinBox()
+        cpeak_thresh_spin.setRange(-40, 0)
+        cpeak_thresh_spin.setValue(-12)
+        cpeak_thresh_spin.setSuffix(" dB")
+        cpeak_thresh_spin.setToolTip("Threshold above which peak compression starts")
+        cpeak_ratio_spin = QDoubleSpinBox()
+        cpeak_ratio_spin.setRange(1.0, 20.0)
+        cpeak_ratio_spin.setValue(8.0)
+        cpeak_ratio_spin.setSingleStep(0.5)
+        cpeak_ratio_spin.setSuffix(":1")
+        cpeak_ratio_spin.setToolTip("Peak compression ratio")
+        self._add_effect_row(ecl, "compressor_peak", "Compressor (Peak)",
                              stub=False,
-                             controls=[comp_thresh_spin, comp_ratio_spin])
-        self._effect_controls["compressor"] = {
-            "threshold_spin": comp_thresh_spin,
-            "ratio_spin": comp_ratio_spin,
+                             controls=[cpeak_thresh_spin, cpeak_ratio_spin])
+        self._effect_controls["compressor_peak"] = {
+            "threshold_spin": cpeak_thresh_spin,
+            "ratio_spin": cpeak_ratio_spin,
         }
-        self._effect_checkboxes["compressor"].setChecked(False)
+        self._effect_checkboxes["compressor_peak"].setChecked(False)
+
+        # 9. Compressor Body (slow attack, smooths overall dynamics)
+        cbody_thresh_spin = QSpinBox()
+        cbody_thresh_spin.setRange(-40, 0)
+        cbody_thresh_spin.setValue(-20)
+        cbody_thresh_spin.setSuffix(" dB")
+        cbody_thresh_spin.setToolTip("Threshold above which body compression starts")
+        cbody_ratio_spin = QDoubleSpinBox()
+        cbody_ratio_spin.setRange(1.0, 20.0)
+        cbody_ratio_spin.setValue(2.5)
+        cbody_ratio_spin.setSingleStep(0.5)
+        cbody_ratio_spin.setSuffix(":1")
+        cbody_ratio_spin.setToolTip("Body compression ratio")
+        self._add_effect_row(ecl, "compressor_body", "Compressor (Body)",
+                             stub=False,
+                             controls=[cbody_thresh_spin, cbody_ratio_spin])
+        self._effect_controls["compressor_body"] = {
+            "threshold_spin": cbody_thresh_spin,
+            "ratio_spin": cbody_ratio_spin,
+        }
+        self._effect_checkboxes["compressor_body"].setChecked(False)
 
         # 7. De-Esser (working)
         deesser_freq_spin = QSpinBox()
@@ -380,7 +442,26 @@ class MixPanel(QWidget):
         }
         self._effect_checkboxes["de_esser"].setChecked(False)
 
-        # 8. Reverb (working)
+        # 11. Soft Clipper
+        sc_drive_spin = QDoubleSpinBox()
+        sc_drive_spin.setRange(1.0, 4.0)
+        sc_drive_spin.setValue(1.5)
+        sc_drive_spin.setSingleStep(0.1)
+        sc_drive_spin.setToolTip("Saturation drive (1.0 = no effect)")
+        sc_mode_combo = QComboBox()
+        sc_mode_combo.addItems(["tanh", "arctan", "cubic"])
+        sc_mode_combo.setCurrentIndex(0)
+        sc_mode_combo.setToolTip("Waveshaping function")
+        self._add_effect_row(ecl, "soft_clipper", "Soft Clipper",
+                             stub=False,
+                             controls=[sc_drive_spin, sc_mode_combo])
+        self._effect_controls["soft_clipper"] = {
+            "drive_spin": sc_drive_spin,
+            "mode_combo": sc_mode_combo,
+        }
+        self._effect_checkboxes["soft_clipper"].setChecked(False)
+
+        # 12. Reverb
         self._reverb_ir_path: str | None = None
         reverb_wet_spin = QDoubleSpinBox()
         reverb_wet_spin.setRange(0.0, 0.50)
@@ -571,7 +652,19 @@ class MixPanel(QWidget):
 
             ctrls = self._effect_controls.get(key, {})
 
-            if key == "noise_gate":
+            if key == "gain_rider":
+                if "target_spin" in ctrls and "target_rms_db" in cfg:
+                    ctrls["target_spin"].setValue(int(cfg["target_rms_db"]))
+                if "max_gain_spin" in ctrls and "max_gain_db" in cfg:
+                    ctrls["max_gain_spin"].setValue(int(cfg["max_gain_db"]))
+
+            elif key == "de_plosive":
+                if "threshold_spin" in ctrls and "threshold_db" in cfg:
+                    ctrls["threshold_spin"].setValue(int(cfg["threshold_db"]))
+                if "reduction_spin" in ctrls and "reduction_db" in cfg:
+                    ctrls["reduction_spin"].setValue(int(cfg["reduction_db"]))
+
+            elif key == "noise_gate":
                 if "threshold_spin" in ctrls and "threshold_db" in cfg:
                     ctrls["threshold_spin"].setValue(int(cfg["threshold_db"]))
                 if "reduction_spin" in ctrls and "reduction_db" in cfg:
@@ -607,7 +700,7 @@ class MixPanel(QWidget):
                     idx = _EQ_PRESET_INDEX.get(cfg["preset"], 0)
                     ctrls["combo"].setCurrentIndex(idx)
 
-            elif key == "compressor":
+            elif key in ("compressor_peak", "compressor_body"):
                 if "threshold_spin" in ctrls and "threshold_db" in cfg:
                     ctrls["threshold_spin"].setValue(int(cfg["threshold_db"]))
                 if "ratio_spin" in ctrls and "ratio" in cfg:
@@ -618,6 +711,14 @@ class MixPanel(QWidget):
                     ctrls["freq_spin"].setValue(int(cfg["freq_hz"]))
                 if "reduction_spin" in ctrls and "reduction_db" in cfg:
                     ctrls["reduction_spin"].setValue(int(cfg["reduction_db"]))
+
+            elif key == "soft_clipper":
+                if "drive_spin" in ctrls and "drive" in cfg:
+                    ctrls["drive_spin"].setValue(float(cfg["drive"]))
+                if "mode_combo" in ctrls and "mode" in cfg:
+                    _SC_MODE_INDEX = {"tanh": 0, "arctan": 1, "cubic": 2}
+                    idx = _SC_MODE_INDEX.get(cfg["mode"], 0)
+                    ctrls["mode_combo"].setCurrentIndex(idx)
 
             elif key == "reverb":
                 if "wet_spin" in ctrls and "wet_mix" in cfg:
@@ -691,6 +792,25 @@ class MixPanel(QWidget):
         """Read all effect controls and return config for process_vocal()."""
         config = {}
 
+        # Gain Rider
+        gr_cb = self._effect_checkboxes["gain_rider"]
+        gr_ctrls = self._effect_controls["gain_rider"]
+        config["gain_rider"] = {
+            "enabled": gr_cb.isChecked(),
+            "target_rms_db": float(gr_ctrls["target_spin"].value()),
+            "max_gain_db": float(gr_ctrls["max_gain_spin"].value()),
+            "max_cut_db": float(gr_ctrls["max_gain_spin"].value()),
+        }
+
+        # De-Plosive
+        dp_cb = self._effect_checkboxes["de_plosive"]
+        dp_ctrls = self._effect_controls["de_plosive"]
+        config["de_plosive"] = {
+            "enabled": dp_cb.isChecked(),
+            "threshold_db": float(dp_ctrls["threshold_spin"].value()),
+            "reduction_db": float(dp_ctrls["reduction_spin"].value()),
+        }
+
         # Noise Gate
         gate_cb = self._effect_checkboxes["noise_gate"]
         gate_ctrls = self._effect_controls["noise_gate"]
@@ -741,13 +861,22 @@ class MixPanel(QWidget):
             "bands": EQ_PRESETS[eq_preset_name],
         }
 
-        # Compressor
-        comp_cb = self._effect_checkboxes["compressor"]
-        comp_ctrls = self._effect_controls["compressor"]
-        config["compressor"] = {
-            "enabled": comp_cb.isChecked(),
-            "threshold_db": float(comp_ctrls["threshold_spin"].value()),
-            "ratio": comp_ctrls["ratio_spin"].value(),
+        # Compressor Peak
+        cpeak_cb = self._effect_checkboxes["compressor_peak"]
+        cpeak_ctrls = self._effect_controls["compressor_peak"]
+        config["compressor_peak"] = {
+            "enabled": cpeak_cb.isChecked(),
+            "threshold_db": float(cpeak_ctrls["threshold_spin"].value()),
+            "ratio": cpeak_ctrls["ratio_spin"].value(),
+        }
+
+        # Compressor Body
+        cbody_cb = self._effect_checkboxes["compressor_body"]
+        cbody_ctrls = self._effect_controls["compressor_body"]
+        config["compressor_body"] = {
+            "enabled": cbody_cb.isChecked(),
+            "threshold_db": float(cbody_ctrls["threshold_spin"].value()),
+            "ratio": cbody_ctrls["ratio_spin"].value(),
         }
 
         # De-Esser
@@ -757,6 +886,17 @@ class MixPanel(QWidget):
             "enabled": de_cb.isChecked(),
             "freq_hz": de_ctrls["freq_spin"].value(),
             "reduction_db": float(de_ctrls["reduction_spin"].value()),
+        }
+
+        # Soft Clipper
+        sc_cb = self._effect_checkboxes["soft_clipper"]
+        sc_ctrls = self._effect_controls["soft_clipper"]
+        sc_mode_map = {0: "tanh", 1: "arctan", 2: "cubic"}
+        config["soft_clipper"] = {
+            "enabled": sc_cb.isChecked(),
+            "drive": sc_ctrls["drive_spin"].value(),
+            "ceiling_db": -1.0,
+            "mode": sc_mode_map[sc_ctrls["mode_combo"].currentIndex()],
         }
 
         # Reverb
