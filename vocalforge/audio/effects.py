@@ -9,8 +9,8 @@ float32 array. The chain order follows VOCAL_ENHANCEMENT.md:
     4. High-Pass Filter  (wraps noise_reduction.high_pass_filter)
     5. Parametric EQ     (biquad cascaded EQ with presets)
     6. Compressor        (RMS envelope, soft-knee, auto makeup)
-    7. De-Esser          (stub)
-    8. Reverb            (stub)
+    7. De-Esser          (frequency-selective sibilance compressor)
+    8. Reverb            (Schroeder algorithmic / convolution IR)
     9. Limiter           (real — brick-wall peak limiter)
 """
 
@@ -82,11 +82,22 @@ DEFAULT_CONFIG = {
     },
     "de_esser": {
         "enabled": False,
-        "stub": True,
+        "stub": False,
+        "freq_hz": 6000,
+        "bandwidth_hz": 4000,
+        "threshold_db": -20.0,
+        "reduction_db": 6.0,
+        "mode": "split",
     },
     "reverb": {
         "enabled": False,
-        "stub": True,
+        "stub": False,
+        "reverb_type": "algorithmic",
+        "decay": 0.7,
+        "wet_mix": 0.15,
+        "predelay_ms": 25.0,
+        "ir_path": None,
+        "ir_highcut_hz": 8000.0,
     },
     "limiter": {
         "enabled": True,
@@ -119,7 +130,7 @@ PRESET_CONFIGS = {
         "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
         "parametric_eq": {"enabled": True, "preset": "bright"},
         "compressor": {"enabled": True, "threshold_db": -18.0, "ratio": 3.0},
-        "de_esser": {"enabled": False},
+        "de_esser": {"enabled": True, "freq_hz": 6000, "reduction_db": 6.0, "mode": "split"},
         "reverb": {"enabled": False},
         "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
@@ -607,13 +618,228 @@ def compressor(data: np.ndarray, sr: int, **params) -> np.ndarray:
 
 
 def de_esser(data: np.ndarray, sr: int, **params) -> np.ndarray:
-    """De-esser (stub — pass-through)."""
-    return data
+    """Frequency-selective de-esser with split-band or wideband mode.
+
+    Detects sibilant energy in a configurable frequency band and applies
+    gain reduction only when the sibilant envelope exceeds the threshold.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        freq_hz: Center frequency of sibilant band (Hz).
+        bandwidth_hz: Width of the sibilant detection band (Hz).
+        threshold_db: Envelope level above which reduction starts (dB).
+        reduction_db: Maximum gain reduction applied to sibilants (dB).
+        mode: "split" (reduce sibilant band only) or "wideband" (full signal).
+
+    Returns:
+        De-essed audio, same shape and dtype as input.
+    """
+    freq_hz = params.get("freq_hz", 6000)
+    bandwidth_hz = params.get("bandwidth_hz", 4000)
+    threshold_db = params.get("threshold_db", -20.0)
+    reduction_db = params.get("reduction_db", 6.0)
+    mode = params.get("mode", "split")
+
+    if data.size == 0 or reduction_db <= 0:
+        return data
+
+    from scipy.signal import butter, sosfiltfilt
+
+    def _process_channel(signal: np.ndarray) -> np.ndarray:
+        n = len(signal)
+
+        # Bandpass filter for sibilant detection
+        low = max(freq_hz - bandwidth_hz / 2, 20.0)
+        high = min(freq_hz + bandwidth_hz / 2, sr / 2 - 1)
+        sos_bp = butter(4, [low, high], btype="band", fs=sr, output="sos")
+        sibilant_band = sosfiltfilt(sos_bp, signal).astype(np.float32)
+
+        # Envelope detection: absolute value smoothed with 5ms moving average
+        envelope = np.abs(sibilant_band).astype(np.float64)
+        smooth_samples = max(1, int(0.005 * sr))
+        kernel = np.ones(smooth_samples, dtype=np.float64) / smooth_samples
+        envelope = np.convolve(envelope, kernel, mode="same")
+
+        # Convert envelope to dB
+        env_db = 20.0 * np.log10(np.maximum(envelope, 1e-10))
+
+        # Gain computation: how much to reduce (in dB) when above threshold
+        over_db = np.maximum(env_db - threshold_db, 0.0)
+        gain_reduction_db = np.minimum(over_db, reduction_db)
+        raw_gain = 10.0 ** (-gain_reduction_db / 20.0)
+
+        # Attack/release smoothing: 1ms attack, 50ms release
+        attack_samples = max(1, int(0.001 * sr))
+        release_samples = max(1, int(0.050 * sr))
+        alpha_attack = 1.0 - np.exp(-1.0 / attack_samples)
+        alpha_release = 1.0 - np.exp(-1.0 / release_samples)
+
+        smoothed = np.empty(n, dtype=np.float64)
+        smoothed[0] = raw_gain[0]
+        for i in range(1, n):
+            if raw_gain[i] < smoothed[i - 1]:
+                smoothed[i] = smoothed[i - 1] + alpha_attack * (raw_gain[i] - smoothed[i - 1])
+            else:
+                smoothed[i] = smoothed[i - 1] + alpha_release * (raw_gain[i] - smoothed[i - 1])
+
+        smoothed_f32 = smoothed.astype(np.float32)
+
+        if mode == "split":
+            # Apply gain only to sibilant band, preserve rest
+            rest = signal - sibilant_band
+            return (rest + sibilant_band * smoothed_f32).astype(np.float32)
+        else:
+            # Wideband: apply gain to full signal
+            return (signal * smoothed_f32).astype(np.float32)
+
+    if data.ndim == 1:
+        return _process_channel(data)
+
+    channels = []
+    for ch in range(data.shape[1]):
+        channels.append(_process_channel(data[:, ch]))
+    return np.column_stack(channels)
+
+
+def _comb_filter(signal: np.ndarray, delay: int, feedback: float) -> np.ndarray:
+    """Schroeder comb filter: y[n] = x[n] + feedback * y[n - delay]."""
+    out = np.zeros(len(signal), dtype=np.float64)
+    for i in range(len(signal)):
+        out[i] = signal[i] + (feedback * out[i - delay] if i >= delay else 0.0)
+    return out
+
+
+def _allpass_filter(signal: np.ndarray, delay: int, feedback: float) -> np.ndarray:
+    """Schroeder allpass filter: y[n] = -feedback*x[n] + x[n-delay] + feedback*y[n-delay]."""
+    n = len(signal)
+    out = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        x_delayed = signal[i - delay] if i >= delay else 0.0
+        y_delayed = out[i - delay] if i >= delay else 0.0
+        out[i] = -feedback * signal[i] + x_delayed + feedback * y_delayed
+    return out
 
 
 def reverb(data: np.ndarray, sr: int, **params) -> np.ndarray:
-    """Reverb (stub — pass-through)."""
-    return data
+    """Dual-mode reverb: Schroeder algorithmic or convolution IR.
+
+    Algorithmic mode uses 4 parallel comb filters averaged, followed by
+    2 series allpass filters. Convolution mode loads an impulse response
+    file and uses FFT-based convolution.
+
+    Args:
+        data: Audio array, shape (samples,) or (samples, channels), float32.
+        sr: Sample rate in Hz.
+        reverb_type: "algorithmic" or "convolution".
+        decay: Comb filter feedback (algorithmic mode), 0.0–1.0.
+        wet_mix: Wet/dry blend ratio, 0.0 (fully dry) to 1.0 (fully wet).
+        predelay_ms: Pre-delay before reverb onset (ms).
+        ir_path: Path to impulse response WAV/FLAC file (convolution mode).
+        ir_highcut_hz: Low-pass cutoff applied to IR (Hz).
+
+    Returns:
+        Reverbed audio, same shape and dtype as input.
+    """
+    reverb_type = params.get("reverb_type", "algorithmic")
+    decay = params.get("decay", 0.7)
+    wet_mix = params.get("wet_mix", 0.15)
+    predelay_ms = params.get("predelay_ms", 25.0)
+    ir_path = params.get("ir_path", None)
+    ir_highcut_hz = params.get("ir_highcut_hz", 8000.0)
+
+    if data.size == 0 or wet_mix <= 0:
+        return data
+
+    original_len = data.shape[0]
+    predelay_samples = max(0, int(predelay_ms / 1000.0 * sr))
+
+    def _algorithmic(signal: np.ndarray) -> np.ndarray:
+        """Schroeder reverberator on a mono signal."""
+        sig64 = signal.astype(np.float64)
+
+        # 4 parallel comb filters (delays scaled to sample rate)
+        base_delays = [1557, 1617, 1491, 1422]
+        scale = sr / 44100.0
+        comb_outputs = []
+        for d in base_delays:
+            delay = max(1, int(d * scale))
+            comb_outputs.append(_comb_filter(sig64, delay, decay))
+
+        # Average comb outputs
+        wet = np.mean(comb_outputs, axis=0)
+
+        # 2 series allpass filters
+        allpass_delays = [225, 556]
+        for d in allpass_delays:
+            delay = max(1, int(d * scale))
+            wet = _allpass_filter(wet, delay, 0.5)
+
+        # Apply predelay
+        if predelay_samples > 0:
+            wet = np.concatenate([np.zeros(predelay_samples, dtype=np.float64), wet])
+            wet = wet[:len(signal)]
+
+        # Normalize wet to prevent blowup
+        peak = np.abs(wet).max()
+        if peak > 0:
+            wet = wet * (np.abs(sig64).max() / peak)
+
+        return ((1.0 - wet_mix) * sig64 + wet_mix * wet).astype(np.float32)
+
+    def _convolution(signal: np.ndarray) -> np.ndarray:
+        """IR convolution reverb on a mono signal."""
+        import soundfile as sf
+        from scipy.signal import butter, fftconvolve, sosfiltfilt
+
+        ir_data, ir_sr = sf.read(ir_path, dtype="float32")
+
+        # Convert IR to mono
+        if ir_data.ndim > 1:
+            ir_data = ir_data.mean(axis=1)
+
+        # Resample IR if needed
+        if ir_sr != sr:
+            from scipy.signal import resample
+            new_len = int(len(ir_data) * sr / ir_sr)
+            ir_data = resample(ir_data, new_len).astype(np.float32)
+
+        # Low-pass IR
+        if ir_highcut_hz < sr / 2 - 1:
+            sos = butter(4, ir_highcut_hz, btype="low", fs=sr, output="sos")
+            ir_data = sosfiltfilt(sos, ir_data).astype(np.float32)
+
+        # Normalize IR
+        ir_peak = np.abs(ir_data).max()
+        if ir_peak > 0:
+            ir_data = ir_data / ir_peak
+
+        # Convolve
+        wet = fftconvolve(signal, ir_data, mode="full")[:len(signal)]
+
+        # Apply predelay
+        if predelay_samples > 0:
+            wet = np.concatenate([np.zeros(predelay_samples, dtype=np.float64), wet])
+            wet = wet[:len(signal)]
+
+        return ((1.0 - wet_mix) * signal + wet_mix * wet).astype(np.float32)
+
+    def _process_channel(signal: np.ndarray) -> np.ndarray:
+        if reverb_type == "convolution" and ir_path is not None:
+            try:
+                return _convolution(signal)
+            except Exception:
+                # Fall back to algorithmic on IR load failure
+                return _algorithmic(signal)
+        return _algorithmic(signal)
+
+    if data.ndim == 1:
+        return _process_channel(data)
+
+    channels = []
+    for ch in range(data.shape[1]):
+        channels.append(_process_channel(data[:, ch]))
+    return np.column_stack(channels)[:original_len]
 
 
 def limiter(data: np.ndarray, sr: int, **params) -> np.ndarray:

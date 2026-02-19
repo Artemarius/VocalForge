@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -359,11 +360,52 @@ class MixPanel(QWidget):
         }
         self._effect_checkboxes["compressor"].setChecked(False)
 
-        # 7. De-Esser (stub)
-        self._add_effect_row(ecl, "de_esser", "De-Esser", stub=True)
+        # 7. De-Esser (working)
+        deesser_freq_spin = QSpinBox()
+        deesser_freq_spin.setRange(3000, 10000)
+        deesser_freq_spin.setValue(6000)
+        deesser_freq_spin.setSuffix(" Hz")
+        deesser_freq_spin.setToolTip("Center frequency for sibilance detection")
+        deesser_reduction_spin = QSpinBox()
+        deesser_reduction_spin.setRange(0, 12)
+        deesser_reduction_spin.setValue(6)
+        deesser_reduction_spin.setSuffix(" dB")
+        deesser_reduction_spin.setToolTip("Maximum sibilance reduction")
+        self._add_effect_row(ecl, "de_esser", "De-Esser",
+                             stub=False,
+                             controls=[deesser_freq_spin, deesser_reduction_spin])
+        self._effect_controls["de_esser"] = {
+            "freq_spin": deesser_freq_spin,
+            "reduction_spin": deesser_reduction_spin,
+        }
+        self._effect_checkboxes["de_esser"].setChecked(False)
 
-        # 8. Reverb (stub)
-        self._add_effect_row(ecl, "reverb", "Reverb", stub=True)
+        # 8. Reverb (working)
+        self._reverb_ir_path: str | None = None
+        reverb_wet_spin = QDoubleSpinBox()
+        reverb_wet_spin.setRange(0.0, 0.50)
+        reverb_wet_spin.setValue(0.15)
+        reverb_wet_spin.setSingleStep(0.05)
+        reverb_wet_spin.setToolTip("Wet/dry mix ratio")
+        reverb_predelay_spin = QSpinBox()
+        reverb_predelay_spin.setRange(0, 80)
+        reverb_predelay_spin.setValue(25)
+        reverb_predelay_spin.setSuffix(" ms")
+        reverb_predelay_spin.setToolTip("Pre-delay before reverb onset")
+        reverb_ir_btn = QPushButton("IR...")
+        reverb_ir_btn.setFixedWidth(40)
+        reverb_ir_btn.setToolTip("Load impulse response file (WAV/FLAC) for convolution reverb")
+        reverb_ir_btn.clicked.connect(self._on_reverb_ir_browse)
+        self._add_effect_row(ecl, "reverb", "Reverb",
+                             stub=False,
+                             controls=[reverb_wet_spin, reverb_predelay_spin,
+                                       reverb_ir_btn])
+        self._effect_controls["reverb"] = {
+            "wet_spin": reverb_wet_spin,
+            "predelay_spin": reverb_predelay_spin,
+            "ir_btn": reverb_ir_btn,
+        }
+        self._effect_checkboxes["reverb"].setChecked(False)
 
         # 9. Limiter (working)
         limiter_spin = QDoubleSpinBox()
@@ -571,6 +613,19 @@ class MixPanel(QWidget):
                 if "ratio_spin" in ctrls and "ratio" in cfg:
                     ctrls["ratio_spin"].setValue(float(cfg["ratio"]))
 
+            elif key == "de_esser":
+                if "freq_spin" in ctrls and "freq_hz" in cfg:
+                    ctrls["freq_spin"].setValue(int(cfg["freq_hz"]))
+                if "reduction_spin" in ctrls and "reduction_db" in cfg:
+                    ctrls["reduction_spin"].setValue(int(cfg["reduction_db"]))
+
+            elif key == "reverb":
+                if "wet_spin" in ctrls and "wet_mix" in cfg:
+                    ctrls["wet_spin"].setValue(float(cfg["wet_mix"]))
+                if "predelay_spin" in ctrls and "predelay_ms" in cfg:
+                    ctrls["predelay_spin"].setValue(int(cfg["predelay_ms"]))
+                self._reverb_ir_path = None
+
             elif key == "limiter":
                 if "spin" in ctrls and "ceiling_db" in cfg:
                     ctrls["spin"].setValue(cfg["ceiling_db"])
@@ -592,6 +647,17 @@ class MixPanel(QWidget):
         dlg = _NRAdvancedDialog(self._nr_advanced_values, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._nr_advanced_values = dlg.values()
+            self._on_effect_manual_change()
+
+    def _on_reverb_ir_browse(self) -> None:
+        """Open file dialog to select an impulse response file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Impulse Response",
+            "", "Audio Files (*.wav *.flac);;All Files (*)",
+        )
+        if path:
+            self._reverb_ir_path = path
+            self._effect_controls["reverb"]["ir_btn"].setToolTip(f"IR: {path}")
             self._on_effect_manual_change()
 
     # --- Public getters ---
@@ -684,11 +750,25 @@ class MixPanel(QWidget):
             "ratio": comp_ctrls["ratio_spin"].value(),
         }
 
-        # De-Esser (stub)
-        config["de_esser"] = {"enabled": False}
+        # De-Esser
+        de_cb = self._effect_checkboxes["de_esser"]
+        de_ctrls = self._effect_controls["de_esser"]
+        config["de_esser"] = {
+            "enabled": de_cb.isChecked(),
+            "freq_hz": de_ctrls["freq_spin"].value(),
+            "reduction_db": float(de_ctrls["reduction_spin"].value()),
+        }
 
-        # Reverb (stub)
-        config["reverb"] = {"enabled": False}
+        # Reverb
+        rev_cb = self._effect_checkboxes["reverb"]
+        rev_ctrls = self._effect_controls["reverb"]
+        config["reverb"] = {
+            "enabled": rev_cb.isChecked(),
+            "wet_mix": rev_ctrls["wet_spin"].value(),
+            "predelay_ms": float(rev_ctrls["predelay_spin"].value()),
+            "reverb_type": "convolution" if self._reverb_ir_path else "algorithmic",
+            "ir_path": self._reverb_ir_path,
+        }
 
         # Limiter
         lim_cb = self._effect_checkboxes["limiter"]

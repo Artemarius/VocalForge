@@ -1280,12 +1280,19 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Effects Error", f"Vocal processing failed:\n{msg}")
 
     def _on_export_vocal(self) -> None:
-        """Export the processed vocal track to a file."""
+        """Export the processed vocal track to a file, with alignment baked in."""
         proc = self._import_panel.vocal_processed_track
         if proc is None:
             return
 
         data, sr = proc
+
+        # Apply alignment offset so the exported vocal is time-aligned
+        net_offset = self._vocal_offset_samples - self._minus_offset_samples
+        if net_offset != 0:
+            minus = self._import_panel.minus_track
+            target_len = minus[0].shape[0] if minus else data.shape[0]
+            data = shift_track(data, net_offset, target_len)
 
         # Suggest path next to the vocal source
         default_dir = ""

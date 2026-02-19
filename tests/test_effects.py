@@ -35,24 +35,158 @@ def _make_loud_signal(duration_s=0.5, sr=SR):
     return (2.0 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
 
 
-# --- Stub pass-through tests ---
+# --- De-Esser tests ---
 
 
-class TestStubs:
-    """Each stubbed effect returns input unchanged."""
+def _make_sibilant_signal(duration_s=1.0, sr=SR):
+    """Signal with both low body (300 Hz) and sibilant (6 kHz) components."""
+    t = np.arange(int(sr * duration_s)) / sr
+    body = 0.3 * np.sin(2 * np.pi * 300 * t)
+    sibilant = 0.3 * np.sin(2 * np.pi * 6000 * t)
+    return (body + sibilant).astype(np.float32)
 
-    @pytest.mark.parametrize("func", [de_esser, reverb])
-    def test_stub_passthrough_mono(self, func):
-        data = _make_tone()
-        result = func(data, SR)
+
+class TestDeEsser:
+
+    def test_reduces_sibilant_energy(self):
+        """Bandpass energy in 4-8 kHz should be reduced after processing."""
+        from scipy.signal import butter, sosfiltfilt
+        data = _make_sibilant_signal()
+        result = de_esser(data, SR, freq_hz=6000, reduction_db=6.0,
+                          threshold_db=-30.0, mode="split")
+        # Measure 4-8 kHz energy before and after
+        sos = butter(4, [4000, 8000], btype="band", fs=SR, output="sos")
+        sib_before = np.sum(sosfiltfilt(sos, data) ** 2)
+        sib_after = np.sum(sosfiltfilt(sos, result) ** 2)
+        assert sib_after < sib_before, \
+            f"Sibilant energy should decrease: {sib_before:.4f} -> {sib_after:.4f}"
+
+    def test_preserves_low_frequency(self):
+        """Energy below 1 kHz should be mostly unchanged in split mode."""
+        from scipy.signal import butter, sosfiltfilt
+        data = _make_sibilant_signal()
+        result = de_esser(data, SR, freq_hz=6000, reduction_db=6.0,
+                          threshold_db=-30.0, mode="split")
+        sos = butter(4, 1000, btype="low", fs=SR, output="sos")
+        low_before = np.sum(sosfiltfilt(sos, data) ** 2)
+        low_after = np.sum(sosfiltfilt(sos, result) ** 2)
+        ratio = low_after / low_before
+        assert 0.9 < ratio < 1.1, \
+            f"Low freq energy ratio {ratio:.3f} out of expected range"
+
+    def test_wideband_mode(self):
+        """Wideband mode should reduce overall energy of a sibilant signal."""
+        data = _make_sibilant_signal()
+        result = de_esser(data, SR, freq_hz=6000, reduction_db=6.0,
+                          threshold_db=-30.0, mode="wideband")
+        energy_before = np.sum(data ** 2)
+        energy_after = np.sum(result ** 2)
+        assert energy_after < energy_before
+
+    def test_zero_reduction_passthrough(self):
+        """reduction_db=0 should return input unchanged."""
+        data = _make_sibilant_signal()
+        result = de_esser(data, SR, reduction_db=0.0)
         np.testing.assert_array_equal(result, data)
 
-    @pytest.mark.parametrize("func", [de_esser, reverb])
-    def test_stub_passthrough_stereo(self, func):
-        mono = _make_tone()
+    def test_preserves_shape_mono(self):
+        data = _make_sibilant_signal(duration_s=0.5)
+        result = de_esser(data, SR, reduction_db=6.0)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_preserves_shape_stereo(self):
+        mono = _make_sibilant_signal(duration_s=0.5)
         data = np.column_stack([mono, mono])
-        result = func(data, SR)
+        result = de_esser(data, SR, reduction_db=6.0)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_empty_input(self):
+        data = np.array([], dtype=np.float32)
+        result = de_esser(data, SR)
+        assert len(result) == 0
+
+    def test_finite_output(self):
+        data = _make_sibilant_signal()
+        result = de_esser(data, SR, reduction_db=12.0, threshold_db=-40.0)
+        assert np.all(np.isfinite(result))
+
+
+# --- Reverb tests ---
+
+
+class TestReverb:
+
+    def test_adds_decay_tail(self):
+        """Impulse signal should have energy beyond original after reverb."""
+        data = np.zeros(SR, dtype=np.float32)
+        data[100] = 1.0  # impulse
+        result = reverb(data, SR, wet_mix=0.5, decay=0.7, predelay_ms=0.0)
+        # Energy in second half should increase (reverb tail)
+        tail_energy_dry = np.sum(data[SR // 2:] ** 2)
+        tail_energy_wet = np.sum(result[SR // 2:] ** 2)
+        assert tail_energy_wet > tail_energy_dry
+
+    def test_dry_preserved(self):
+        """At low wet_mix, output should be highly correlated with input."""
+        data = _make_tone(duration_s=1.0, amplitude=0.5)
+        result = reverb(data, SR, wet_mix=0.05, decay=0.5)
+        corr = np.corrcoef(data, result)[0, 1]
+        assert corr > 0.95, f"Correlation {corr} too low at wet_mix=0.05"
+
+    def test_zero_wet_passthrough(self):
+        """wet_mix=0 should return input unchanged."""
+        data = _make_tone()
+        result = reverb(data, SR, wet_mix=0.0)
         np.testing.assert_array_equal(result, data)
+
+    def test_higher_decay_more_tail(self):
+        """Higher decay should produce more tail energy."""
+        data = np.zeros(SR, dtype=np.float32)
+        data[100] = 1.0
+        low = reverb(data, SR, wet_mix=0.5, decay=0.3, predelay_ms=0.0)
+        high = reverb(data, SR, wet_mix=0.5, decay=0.8, predelay_ms=0.0)
+        tail_low = np.sum(low[SR // 2:] ** 2)
+        tail_high = np.sum(high[SR // 2:] ** 2)
+        assert tail_high > tail_low, \
+            f"Higher decay should produce more tail: {tail_low:.6f} vs {tail_high:.6f}"
+
+    def test_predelay_shifts_wet_signal(self):
+        """With predelay, wet onset should be later."""
+        data = np.zeros(SR, dtype=np.float32)
+        data[100] = 1.0
+        no_delay = reverb(data, SR, wet_mix=1.0, decay=0.5, predelay_ms=0.0)
+        with_delay = reverb(data, SR, wet_mix=1.0, decay=0.5, predelay_ms=50.0)
+        # Find first sample above threshold
+        thresh = 0.01
+        onset_no = np.argmax(np.abs(no_delay) > thresh)
+        onset_wd = np.argmax(np.abs(with_delay) > thresh)
+        assert onset_wd >= onset_no, \
+            f"Predelay should shift onset: {onset_no} vs {onset_wd}"
+
+    def test_preserves_shape_mono(self):
+        data = _make_tone(duration_s=0.5)
+        result = reverb(data, SR, wet_mix=0.15)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_preserves_shape_stereo(self):
+        mono = _make_tone(duration_s=0.5)
+        data = np.column_stack([mono, mono])
+        result = reverb(data, SR, wet_mix=0.15)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_empty_input(self):
+        data = np.array([], dtype=np.float32)
+        result = reverb(data, SR)
+        assert len(result) == 0
+
+    def test_finite_output(self):
+        data = _make_tone(duration_s=0.5)
+        result = reverb(data, SR, wet_mix=0.3, decay=0.8)
+        assert np.all(np.isfinite(result))
 
 
 # --- Noise Gate tests ---
@@ -459,6 +593,30 @@ class TestProcessVocal:
         from vocalforge.audio.effects import _EFFECT_FUNCS
         for name in CHAIN_ORDER:
             assert name in _EFFECT_FUNCS
+
+    def test_full_chain_all_enabled(self):
+        """All 9 effects enabled should produce finite output with correct shape."""
+        data = _make_tone(duration_s=2.0, amplitude=0.5)
+        config = {
+            "noise_gate": {"enabled": True, "threshold_db": -35.0,
+                           "reduction_db": -40.0},
+            "spectral_noise_reduction": {"enabled": True, "strength": 0.5,
+                                          "mode": "adaptive"},
+            "dereverb": {"enabled": True, "strength": 0.4},
+            "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
+            "parametric_eq": {"enabled": True,
+                              "bands": EQ_PRESETS["bright"]},
+            "compressor": {"enabled": True, "threshold_db": -18.0,
+                           "ratio": 3.0},
+            "de_esser": {"enabled": True, "freq_hz": 6000,
+                         "reduction_db": 6.0, "mode": "split"},
+            "reverb": {"enabled": True, "wet_mix": 0.15, "decay": 0.7},
+            "limiter": {"enabled": True, "ceiling_db": -0.7},
+        }
+        result = process_vocal(data, SR, config=config)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+        assert np.all(np.isfinite(result))
 
     def test_eq_compressor_limiter_integration(self):
         """EQ + compressor + limiter enabled together produce valid output."""
