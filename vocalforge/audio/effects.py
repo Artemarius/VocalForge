@@ -46,6 +46,11 @@ DEFAULT_CONFIG = {
         "stub": False,
         "strength": 0.75,
         "guide_stem": None,
+        "mode": "auto",
+        "n_std_thresh": 1.5,
+        "use_torch": None,
+        "freq_smooth_hz": 500,
+        "time_smooth_ms": 50,
     },
     "dereverb": {
         "enabled": False,
@@ -56,12 +61,12 @@ DEFAULT_CONFIG = {
     "highpass_filter": {
         "enabled": True,
         "stub": False,
-        "cutoff_hz": 80.0,
+        "cutoff_hz": 100.0,
     },
     "parametric_eq": {
         "enabled": False,
         "stub": False,
-        "preset": "clean_up",
+        "preset": "bright",
         "bands": None,  # filled from EQ_PRESETS at import time (see below)
     },
     "compressor": {
@@ -86,7 +91,7 @@ DEFAULT_CONFIG = {
     "limiter": {
         "enabled": True,
         "stub": False,
-        "ceiling_db": -1.0,
+        "ceiling_db": -0.7,
         "release_ms": 50.0,
     },
 }
@@ -97,26 +102,26 @@ PRESET_CONFIGS = {
     "Clean": {
         "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
                         "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
-        "spectral_noise_reduction": {"enabled": True, "strength": 0.75},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
         "dereverb": {"enabled": False},
-        "highpass_filter": {"enabled": True, "cutoff_hz": 80.0},
+        "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
         "parametric_eq": {"enabled": False},
         "compressor": {"enabled": False},
         "de_esser": {"enabled": False},
         "reverb": {"enabled": False},
-        "limiter": {"enabled": True, "ceiling_db": -1.0},
+        "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
     "Enhanced": {
         "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
                         "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
-        "spectral_noise_reduction": {"enabled": True, "strength": 0.75},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
         "dereverb": {"enabled": True, "strength": 0.5},
-        "highpass_filter": {"enabled": True, "cutoff_hz": 80.0},
-        "parametric_eq": {"enabled": True, "preset": "clean_up"},
+        "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
+        "parametric_eq": {"enabled": True, "preset": "bright"},
         "compressor": {"enabled": True, "threshold_db": -18.0, "ratio": 3.0},
         "de_esser": {"enabled": False},
         "reverb": {"enabled": False},
-        "limiter": {"enabled": True, "ceiling_db": -1.0},
+        "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
 }
 
@@ -142,7 +147,7 @@ EQ_PRESETS = {
 }
 
 # Patch DEFAULT_CONFIG with actual EQ bands now that EQ_PRESETS is defined
-DEFAULT_CONFIG["parametric_eq"]["bands"] = EQ_PRESETS["clean_up"]
+DEFAULT_CONFIG["parametric_eq"]["bands"] = EQ_PRESETS["bright"]
 
 
 def _merge_config(defaults: dict, overrides: dict | None) -> dict:
@@ -271,6 +276,11 @@ def spectral_noise_reduction(data: np.ndarray, sr: int, **params) -> np.ndarray:
     """
     strength = params.get("strength", 0.75)
     guide_stem = params.get("guide_stem", None)
+    mode = params.get("mode", "auto")
+    n_std_thresh = params.get("n_std_thresh", 1.5)
+    use_torch = params.get("use_torch", None)
+    freq_smooth_hz = params.get("freq_smooth_hz", 500)
+    time_smooth_ms = params.get("time_smooth_ms", 50)
 
     if strength == 0.0:
         return data
@@ -282,6 +292,11 @@ def spectral_noise_reduction(data: np.ndarray, sr: int, **params) -> np.ndarray:
         strength=strength,
         guide_stem=guide_stem,
         hpf_cutoff_hz=0.0,
+        mode=mode,
+        n_std_thresh=n_std_thresh,
+        use_torch=use_torch,
+        freq_smooth_hz=freq_smooth_hz,
+        time_smooth_ms=time_smooth_ms,
     )
 
 

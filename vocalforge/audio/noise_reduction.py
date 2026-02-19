@@ -157,6 +157,11 @@ def reduce_noise(
     strength: float = 1.0,
     guide_stem: np.ndarray | None = None,
     hpf_cutoff_hz: float = 0.0,
+    mode: str = "auto",
+    n_std_thresh: float = 1.5,
+    use_torch: bool | None = None,
+    freq_smooth_hz: float = 500,
+    time_smooth_ms: float = 50,
 ) -> np.ndarray:
     """Apply spectral-gating noise reduction to audio.
 
@@ -170,6 +175,14 @@ def reduce_noise(
         guide_stem: Optional separated vocal stem used to find silent regions
             for noise profiling.  Only used when noise_clip is None.
         hpf_cutoff_hz: High-pass filter cutoff in Hz.  0 = disabled.
+        mode: NR algorithm mode — "auto", "stationary", or "adaptive".
+            "auto" uses stationary when a reliable noise profile is available
+            (explicit clip or stem-guided), adaptive otherwise.
+        n_std_thresh: Stationary mode threshold sensitivity (0.5–3.0).
+        use_torch: Whether to use torch/CUDA acceleration.
+            None = auto-detect CUDA availability.
+        freq_smooth_hz: Frequency mask smoothing width in Hz.
+        time_smooth_ms: Temporal mask smoothing width in ms.
 
     Returns:
         Noise-reduced audio, same shape and dtype (float32) as input.
@@ -190,11 +203,33 @@ def reduce_noise(
 
     import noisereduce as nr
 
+    # Track whether we obtained a high-quality noise profile
+    _had_good_profile = noise_clip is not None  # user supplied explicitly
+
     if noise_clip is None and guide_stem is not None:
         noise_clip = estimate_noise_from_stem(data, guide_stem, sample_rate)
+        if noise_clip is not None:
+            _had_good_profile = True  # stem-guided = good quality
 
     if noise_clip is None:
         noise_clip = estimate_noise_profile(data, sample_rate)
+        # _had_good_profile stays False — first-0.5s fallback is weak
+
+    # Resolve mode → boolean
+    if mode == "auto":
+        stationary = _had_good_profile  # stationary when profile is reliable
+    elif mode == "stationary":
+        stationary = True
+    else:  # "adaptive"
+        stationary = False
+
+    # Torch / CUDA auto-detection
+    if use_torch is None:
+        try:
+            import torch
+            use_torch = torch.cuda.is_available()
+        except ImportError:
+            use_torch = False
 
     is_mono = data.ndim == 1
 
@@ -211,6 +246,12 @@ def reduce_noise(
         sr=sample_rate,
         y_noise=y_noise,
         prop_decrease=float(strength),
+        stationary=stationary,
+        n_std_thresh_stationary=float(n_std_thresh),
+        use_torch=use_torch,
+        device="cuda" if use_torch else "cpu",
+        freq_mask_smooth_hz=float(freq_smooth_hz),
+        time_mask_smooth_ms=float(time_smooth_ms),
     )
 
     # Transpose back for multichannel

@@ -478,3 +478,36 @@ class TestProcessVocal:
         assert result.shape == data.shape
         assert result.dtype == np.float32
         assert np.all(np.isfinite(result))
+
+
+# --- Spectral Noise Reduction wrapper tests ---
+
+
+class TestSpectralNoiseReduction:
+
+    def test_mode_param_accepted(self):
+        """Wrapper should accept mode kwarg without error."""
+        data = _make_tone(duration_s=2.0)
+        result = spectral_noise_reduction(data, SR, strength=0.5, mode="adaptive")
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_advanced_params_accepted(self):
+        """All new kwargs should pass through to reduce_noise."""
+        data = _make_tone(duration_s=2.0)
+        result = spectral_noise_reduction(
+            data, SR, strength=0.5, mode="stationary",
+            n_std_thresh=2.0, use_torch=False,
+            freq_smooth_hz=300, time_smooth_ms=80,
+        )
+        assert result.shape == data.shape
+        assert np.all(np.isfinite(result))
+
+    def test_default_config_includes_mode(self):
+        """DEFAULT_CONFIG should have mode='auto' for spectral_noise_reduction."""
+        snr_cfg = DEFAULT_CONFIG["spectral_noise_reduction"]
+        assert snr_cfg["mode"] == "auto"
+        assert "n_std_thresh" in snr_cfg
+        assert "use_torch" in snr_cfg
+        assert "freq_smooth_hz" in snr_cfg
+        assert "time_smooth_ms" in snr_cfg

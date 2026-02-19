@@ -4,7 +4,10 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -21,6 +24,100 @@ from vocalforge.ui import JumpSlider
 # controls_factory returns (widget_list, value_getter_name) or None for stubs.
 
 _NR_STRENGTHS = {"Subtle": 0.5, "Moderate": 0.75, "Aggressive": 1.0}
+
+
+class _NRAdvancedDialog(QDialog):
+    """Advanced noise reduction parameters dialog."""
+
+    _DEFAULTS = {
+        "n_std_thresh": 1.5,
+        "freq_smooth_hz": 500,
+        "time_smooth_ms": 50,
+        "use_torch": None,
+    }
+
+    def __init__(self, current_values: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Noise Reduction — Advanced")
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._thresh_spin = QDoubleSpinBox()
+        self._thresh_spin.setRange(0.5, 3.0)
+        self._thresh_spin.setSingleStep(0.1)
+        self._thresh_spin.setValue(current_values.get("n_std_thresh", 1.5))
+        self._thresh_spin.setToolTip("Stationary mode threshold sensitivity (lower = more aggressive)")
+        form.addRow("Stat. threshold:", self._thresh_spin)
+
+        self._freq_spin = QSpinBox()
+        self._freq_spin.setRange(100, 2000)
+        self._freq_spin.setSingleStep(50)
+        self._freq_spin.setValue(current_values.get("freq_smooth_hz", 500))
+        self._freq_spin.setSuffix(" Hz")
+        self._freq_spin.setToolTip("Frequency mask smoothing width")
+        form.addRow("Freq. smoothing:", self._freq_spin)
+
+        self._time_spin = QSpinBox()
+        self._time_spin.setRange(10, 200)
+        self._time_spin.setSingleStep(5)
+        self._time_spin.setValue(current_values.get("time_smooth_ms", 50))
+        self._time_spin.setSuffix(" ms")
+        self._time_spin.setToolTip("Temporal mask smoothing width")
+        form.addRow("Time smoothing:", self._time_spin)
+
+        self._cuda_cb = QCheckBox()
+        # Auto-detect CUDA availability
+        cuda_available = False
+        try:
+            import torch
+            cuda_available = torch.cuda.is_available()
+        except ImportError:
+            pass
+        self._cuda_cb.setEnabled(cuda_available)
+        use_torch_val = current_values.get("use_torch")
+        if use_torch_val is None:
+            self._cuda_cb.setChecked(cuda_available)
+        else:
+            self._cuda_cb.setChecked(bool(use_torch_val))
+        self._cuda_cb.setToolTip(
+            "Use GPU acceleration (CUDA)" if cuda_available
+            else "CUDA not available — install torch with CUDA support"
+        )
+        form.addRow("Use GPU (CUDA):", self._cuda_cb)
+
+        layout.addLayout(form)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        restore_btn = QPushButton("Restore Defaults")
+        restore_btn.clicked.connect(self._restore_defaults)
+        btn_layout.addWidget(restore_btn)
+        btn_layout.addStretch()
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        btn_layout.addWidget(button_box)
+        layout.addLayout(btn_layout)
+
+    def _restore_defaults(self):
+        self._thresh_spin.setValue(self._DEFAULTS["n_std_thresh"])
+        self._freq_spin.setValue(self._DEFAULTS["freq_smooth_hz"])
+        self._time_spin.setValue(self._DEFAULTS["time_smooth_ms"])
+        cuda_available = self._cuda_cb.isEnabled()
+        self._cuda_cb.setChecked(cuda_available)
+
+    def values(self) -> dict:
+        use_torch = self._cuda_cb.isChecked() if self._cuda_cb.isEnabled() else None
+        return {
+            "n_std_thresh": self._thresh_spin.value(),
+            "freq_smooth_hz": self._freq_spin.value(),
+            "time_smooth_ms": self._time_spin.value(),
+            "use_torch": use_torch,
+        }
 
 
 class MixPanel(QWidget):
@@ -134,6 +231,10 @@ class MixPanel(QWidget):
         self._effect_checkboxes: dict[str, QCheckBox] = {}
         self._effect_controls: dict[str, dict] = {}
         self._preset_updating = False  # guard against recursive signals
+        self._nr_advanced_values = {
+            "n_std_thresh": 1.5, "freq_smooth_hz": 500,
+            "time_smooth_ms": 50, "use_torch": None,
+        }
 
         # Global bypass checkbox
         self._effects_enabled_cb = QCheckBox("Enable Effects Chain")
@@ -186,10 +287,24 @@ class MixPanel(QWidget):
         nr_combo = QComboBox()
         nr_combo.addItems(["Subtle", "Moderate", "Aggressive"])
         nr_combo.setCurrentIndex(1)
+        nr_mode_combo = QComboBox()
+        nr_mode_combo.addItems(["Auto", "Stationary", "Adaptive"])
+        nr_mode_combo.setCurrentIndex(0)
+        nr_mode_combo.setToolTip(
+            "Auto: stationary when stem-guided profile available, adaptive otherwise\n"
+            "Stationary: best for constant noise (fan, hiss) with good profile\n"
+            "Adaptive: handles varying noise, less dependent on profile quality"
+        )
+        nr_adv_btn = QPushButton("\u2699")
+        nr_adv_btn.setFixedSize(24, 24)
+        nr_adv_btn.setToolTip("Advanced noise reduction parameters")
+        nr_adv_btn.clicked.connect(self._on_nr_advanced)
         self._add_effect_row(ecl, "spectral_noise_reduction",
                              "Noise Reduction", stub=False,
-                             controls=[nr_combo])
-        self._effect_controls["spectral_noise_reduction"] = {"combo": nr_combo}
+                             controls=[nr_combo, nr_mode_combo, nr_adv_btn])
+        self._effect_controls["spectral_noise_reduction"] = {
+            "combo": nr_combo, "mode_combo": nr_mode_combo, "adv_btn": nr_adv_btn,
+        }
 
         # 3. De-Reverb (working)
         dereverb_combo = QComboBox()
@@ -205,7 +320,7 @@ class MixPanel(QWidget):
         # 4. High-Pass Filter (working)
         hpf_spin = QSpinBox()
         hpf_spin.setRange(0, 200)
-        hpf_spin.setValue(80)
+        hpf_spin.setValue(100)
         hpf_spin.setSuffix(" Hz")
         hpf_spin.setToolTip("High-pass filter cutoff (0 = disabled)")
         self._add_effect_row(ecl, "highpass_filter",
@@ -216,7 +331,7 @@ class MixPanel(QWidget):
         # 5. Parametric EQ (working)
         eq_combo = QComboBox()
         eq_combo.addItems(["Clean Up", "Warm", "Bright"])
-        eq_combo.setCurrentIndex(0)
+        eq_combo.setCurrentIndex(2)
         eq_combo.setToolTip("EQ preset: shape the vocal tone")
         self._add_effect_row(ecl, "parametric_eq", "Parametric EQ",
                              stub=False, controls=[eq_combo])
@@ -253,7 +368,7 @@ class MixPanel(QWidget):
         # 9. Limiter (working)
         limiter_spin = QDoubleSpinBox()
         limiter_spin.setRange(-3.0, 0.0)
-        limiter_spin.setValue(-1.0)
+        limiter_spin.setValue(-0.7)
         limiter_spin.setSingleStep(0.1)
         limiter_spin.setSuffix(" dB")
         limiter_spin.setToolTip("Limiter ceiling in dB")
@@ -424,6 +539,16 @@ class MixPanel(QWidget):
                 if "combo" in ctrls and "strength" in cfg:
                     idx = _NR_STRENGTH_INDEX.get(cfg["strength"], 1)
                     ctrls["combo"].setCurrentIndex(idx)
+                if "mode_combo" in ctrls and "mode" in cfg:
+                    mode_idx = {"auto": 0, "stationary": 1, "adaptive": 2}.get(
+                        cfg["mode"], 0)
+                    ctrls["mode_combo"].setCurrentIndex(mode_idx)
+                self._nr_advanced_values = {
+                    "n_std_thresh": cfg.get("n_std_thresh", 1.5),
+                    "freq_smooth_hz": cfg.get("freq_smooth_hz", 500),
+                    "time_smooth_ms": cfg.get("time_smooth_ms", 50),
+                    "use_torch": cfg.get("use_torch", None),
+                }
 
             elif key == "dereverb":
                 if "combo" in ctrls and "strength" in cfg:
@@ -461,6 +586,13 @@ class MixPanel(QWidget):
     def _on_effects_enabled_toggled(self, enabled: bool) -> None:
         """Show/hide the effects container when the global bypass toggles."""
         self._effects_container.setVisible(enabled)
+
+    def _on_nr_advanced(self) -> None:
+        """Open the advanced NR parameters dialog."""
+        dlg = _NRAdvancedDialog(self._nr_advanced_values, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._nr_advanced_values = dlg.values()
+            self._on_effect_manual_change()
 
     # --- Public getters ---
 
@@ -504,11 +636,14 @@ class MixPanel(QWidget):
 
         # Noise Reduction
         nr_cb = self._effect_checkboxes["spectral_noise_reduction"]
-        nr_combo = self._effect_controls["spectral_noise_reduction"]["combo"]
+        nr_ctrls = self._effect_controls["spectral_noise_reduction"]
         strength_map = {0: 0.5, 1: 0.75, 2: 1.0}
+        mode_map = {0: "auto", 1: "stationary", 2: "adaptive"}
         config["spectral_noise_reduction"] = {
             "enabled": nr_cb.isChecked(),
-            "strength": strength_map[nr_combo.currentIndex()],
+            "strength": strength_map[nr_ctrls["combo"].currentIndex()],
+            "mode": mode_map[nr_ctrls["mode_combo"].currentIndex()],
+            **self._nr_advanced_values,
         }
 
         # De-Reverb

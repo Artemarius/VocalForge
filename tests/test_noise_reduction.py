@@ -255,3 +255,93 @@ def test_reduce_noise_with_hpf():
     # The 440 Hz tone should be preserved, the 40 Hz rumble attenuated
     corr_tone = np.corrcoef(tone, result)[0, 1]
     assert corr_tone > 0.95
+
+
+# --- Mode selection tests ---
+
+
+def test_stationary_mode_explicit():
+    """mode='stationary' with explicit noise clip should reduce noise."""
+    rng = np.random.default_rng(42)
+    noise_only = (0.1 * rng.standard_normal(SR // 2)).astype(np.float32)
+    tone_noisy = _make_noisy_tone(duration_s=1.5, noise_level=0.1)
+    signal = np.concatenate([noise_only, tone_noisy])
+    noise_clip = signal[:SR // 2]
+
+    reduced = reduce_noise(signal, SR, noise_clip=noise_clip,
+                           strength=1.0, mode="stationary")
+    original_rms = np.sqrt(np.mean(signal[:SR // 2].astype(np.float64) ** 2))
+    reduced_rms = np.sqrt(np.mean(reduced[:SR // 2].astype(np.float64) ** 2))
+    assert reduced_rms < original_rms
+
+
+def test_adaptive_mode_explicit():
+    """mode='adaptive' should reduce noise without explicit noise clip."""
+    noisy = _make_noisy_tone(duration_s=2.0, noise_level=0.15)
+    reduced = reduce_noise(noisy, SR, strength=0.75, mode="adaptive")
+    assert reduced.shape == noisy.shape
+    assert reduced.dtype == np.float32
+
+
+def test_auto_mode_with_guide_stem_uses_stationary():
+    """Auto mode with a good stem should use stationary (stronger NR)."""
+    rng = np.random.default_rng(42)
+    silence = np.zeros(SR, dtype=np.float32)
+    tone = _make_tone(duration_s=1.0, freq=440)
+    vocal_sep = np.concatenate([silence, tone])
+
+    noise_full = (0.1 * rng.standard_normal(SR * 2)).astype(np.float32)
+    vocal_rec = noise_full.copy()
+    vocal_rec[SR:] += tone
+
+    reduced = reduce_noise(vocal_rec, SR, strength=1.0,
+                           guide_stem=vocal_sep, mode="auto")
+    # Should successfully reduce noise in the silent region
+    original_rms = np.sqrt(np.mean(vocal_rec[:SR].astype(np.float64) ** 2))
+    reduced_rms = np.sqrt(np.mean(reduced[:SR].astype(np.float64) ** 2))
+    assert reduced_rms < original_rms
+
+
+def test_auto_mode_without_guide_uses_adaptive():
+    """Auto mode without stem or clip should fallback to adaptive."""
+    noisy = _make_noisy_tone(duration_s=2.0, noise_level=0.1)
+    reduced = reduce_noise(noisy, SR, strength=0.75, mode="auto")
+    assert reduced.shape == noisy.shape
+    assert reduced.dtype == np.float32
+
+
+def test_smoothing_parameters_accepted():
+    """Custom freq/time smoothing values should not crash."""
+    noisy = _make_noisy_tone(duration_s=1.0, noise_level=0.1)
+    result = reduce_noise(noisy, SR, strength=0.5,
+                          freq_smooth_hz=200, time_smooth_ms=100)
+    assert result.shape == noisy.shape
+    assert np.all(np.isfinite(result))
+
+
+def test_n_std_thresh_parameter():
+    """Lower n_std_thresh should produce more aggressive noise reduction."""
+    rng = np.random.default_rng(42)
+    noise_only = (0.1 * rng.standard_normal(SR // 2)).astype(np.float32)
+    tone_noisy = _make_noisy_tone(duration_s=1.5, noise_level=0.1)
+    signal = np.concatenate([noise_only, tone_noisy])
+    noise_clip = signal[:SR // 2]
+
+    reduced_mild = reduce_noise(signal, SR, noise_clip=noise_clip,
+                                strength=1.0, mode="stationary",
+                                n_std_thresh=3.0)
+    reduced_aggressive = reduce_noise(signal, SR, noise_clip=noise_clip,
+                                      strength=1.0, mode="stationary",
+                                      n_std_thresh=0.5)
+    rms_mild = np.sqrt(np.mean(reduced_mild[:SR // 2].astype(np.float64) ** 2))
+    rms_aggressive = np.sqrt(np.mean(
+        reduced_aggressive[:SR // 2].astype(np.float64) ** 2))
+    assert rms_aggressive <= rms_mild
+
+
+def test_use_torch_false_explicit():
+    """use_torch=False should work (CPU path)."""
+    noisy = _make_noisy_tone(duration_s=1.0, noise_level=0.1)
+    result = reduce_noise(noisy, SR, strength=0.5, use_torch=False)
+    assert result.shape == noisy.shape
+    assert result.dtype == np.float32
