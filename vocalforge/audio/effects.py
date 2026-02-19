@@ -1,21 +1,24 @@
-"""Effects chain — 13-stage vocal processing pipeline.
+"""Effects chain — 14-stage vocal processing pipeline.
 
 Each effect function takes (data, sr, **params) and returns a same-shape
-float32 array. The chain order follows VOCAL_ENHANCEMENT.md:
+float32 array. Two-pass noise reduction: NR runs before the gain rider
+(at natural signal level) and again after (light cleanup of amplified
+residual noise).
 
-     1. Gain Rider       (RMS auto-leveling before compression)
-     2. De-Plosive       (dynamic low-freq transient filter)
-     3. Noise Gate       (RMS-envelope gating)
-     4. Spectral NR      (wraps noise_reduction.reduce_noise)
-     5. De-reverb        (spectral subtraction via transient detection)
-     6. High-Pass Filter (wraps noise_reduction.high_pass_filter)
-     7. Parametric EQ    (biquad cascaded EQ with presets)
-     8. Compressor Peak  (fast attack, high ratio — catches transient spikes)
-     9. Compressor Body  (slow attack, gentle ratio — smooths dynamics)
-    10. De-Esser         (frequency-selective sibilance compressor)
-    11. Soft Clipper      (waveshaping saturation for peak control)
-    12. Reverb           (Schroeder algorithmic / convolution IR)
-    13. Limiter          (brick-wall peak limiter)
+     1. Noise Gate       (RMS-envelope gating — silence gaps first)
+     2. Spectral NR      (wraps noise_reduction.reduce_noise, stem-guided)
+     3. Gain Rider       (RMS auto-leveling on cleaned signal)
+     4. De-Plosive       (dynamic low-freq transient filter)
+     5. NR Cleanup       (second-pass NR: gentle, stationary, no stem guide)
+     6. De-reverb        (spectral subtraction via transient detection)
+     7. High-Pass Filter (wraps noise_reduction.high_pass_filter)
+     8. Parametric EQ    (biquad cascaded EQ with presets)
+     9. Compressor Peak  (fast attack, high ratio — catches transient spikes)
+    10. Compressor Body  (slow attack, gentle ratio — smooths dynamics)
+    11. De-Esser         (frequency-selective sibilance compressor)
+    12. Soft Clipper      (waveshaping saturation for peak control)
+    13. Reverb           (Schroeder algorithmic / convolution IR)
+    14. Limiter          (brick-wall peak limiter)
 """
 
 import copy
@@ -24,10 +27,11 @@ import numpy as np
 
 # Processing chain order
 CHAIN_ORDER = [
-    "gain_rider",
-    "de_plosive",
     "noise_gate",
     "spectral_noise_reduction",
+    "gain_rider",
+    "de_plosive",
+    "nr_cleanup",
     "dereverb",
     "highpass_filter",
     "parametric_eq",
@@ -41,17 +45,17 @@ CHAIN_ORDER = [
 
 DEFAULT_CONFIG = {
     "gain_rider": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "target_rms_db": -20.0,
         "window_ms": 300.0,
-        "max_gain_db": 6.0,
+        "max_gain_db": 4.0,
         "max_cut_db": 6.0,
         "smoothing_ms": 150.0,
         "silence_threshold_db": -50.0,
     },
     "de_plosive": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "plosive_freq_hz": 200.0,
         "threshold_db": -25.0,
@@ -60,7 +64,7 @@ DEFAULT_CONFIG = {
         "release_ms": 30.0,
     },
     "noise_gate": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "threshold_db": -35.0,
         "attack_ms": 2.0,
@@ -79,8 +83,18 @@ DEFAULT_CONFIG = {
         "freq_smooth_hz": 500,
         "time_smooth_ms": 50,
     },
+    "nr_cleanup": {
+        "enabled": True,
+        "stub": False,
+        "strength": 0.7,
+        "mode": "stationary",
+        "n_std_thresh": 1.5,
+        "use_torch": None,
+        "freq_smooth_hz": 500,
+        "time_smooth_ms": 50,
+    },
     "dereverb": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "strength": 0.4,
         "frame_size": 2048,
@@ -88,16 +102,16 @@ DEFAULT_CONFIG = {
     "highpass_filter": {
         "enabled": True,
         "stub": False,
-        "cutoff_hz": 100.0,
+        "cutoff_hz": 120.0,
     },
     "parametric_eq": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
-        "preset": "bright",
+        "preset": "clean_up",
         "bands": None,  # filled from EQ_PRESETS at import time (see below)
     },
     "compressor_peak": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "threshold_db": -12.0,
         "ratio": 8.0,
@@ -108,7 +122,7 @@ DEFAULT_CONFIG = {
         "mix": 1.0,
     },
     "compressor_body": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "threshold_db": -20.0,
         "ratio": 2.5,
@@ -119,23 +133,23 @@ DEFAULT_CONFIG = {
         "mix": 1.0,
     },
     "de_esser": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
-        "freq_hz": 6000,
+        "freq_hz": 5000,
         "bandwidth_hz": 4000,
         "threshold_db": -20.0,
-        "reduction_db": 6.0,
+        "reduction_db": 12.0,
         "mode": "split",
     },
     "soft_clipper": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
-        "drive": 1.5,
+        "drive": 1.8,
         "ceiling_db": -1.0,
         "mode": "tanh",
     },
     "reverb": {
-        "enabled": False,
+        "enabled": True,
         "stub": False,
         "reverb_type": "algorithmic",
         "decay": 0.7,
@@ -156,13 +170,12 @@ DEFAULT_CONFIG = {
 PRESET_CONFIGS = {
     "Raw": {name: {"enabled": False} for name in CHAIN_ORDER},
     "Clean": {
-        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
-                        "max_cut_db": 6.0},
-        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
-                        "reduction_db": 10.0},
         "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
                         "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
         "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
+        "gain_rider": {"enabled": False},
+        "de_plosive": {"enabled": False},
+        "nr_cleanup": {"enabled": False},
         "dereverb": {"enabled": False},
         "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
         "parametric_eq": {"enabled": False},
@@ -174,33 +187,37 @@ PRESET_CONFIGS = {
         "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
     "Enhanced": {
-        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
-                        "max_cut_db": 6.0},
-        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
-                        "reduction_db": 10.0},
         "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
                         "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
         "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
+        "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 4.0,
+                        "max_cut_db": 6.0},
+        "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
+                        "reduction_db": 10.0},
+        "nr_cleanup": {"enabled": True, "strength": 0.7, "mode": "stationary",
+                       "n_std_thresh": 1.5},
         "dereverb": {"enabled": True, "strength": 0.5},
-        "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
-        "parametric_eq": {"enabled": True, "preset": "bright"},
+        "highpass_filter": {"enabled": True, "cutoff_hz": 120.0},
+        "parametric_eq": {"enabled": True, "preset": "clean_up"},
         "compressor_peak": {"enabled": True, "threshold_db": -12.0, "ratio": 8.0,
                              "attack_ms": 2.0, "release_ms": 80.0, "knee_db": 3.0},
         "compressor_body": {"enabled": True, "threshold_db": -20.0, "ratio": 2.5,
                              "attack_ms": 20.0, "release_ms": 200.0, "knee_db": 8.0},
-        "de_esser": {"enabled": True, "freq_hz": 6000, "reduction_db": 6.0, "mode": "split"},
-        "soft_clipper": {"enabled": True, "drive": 1.5, "ceiling_db": -1.0, "mode": "tanh"},
-        "reverb": {"enabled": False},
+        "de_esser": {"enabled": True, "freq_hz": 5000, "reduction_db": 12.0, "mode": "split"},
+        "soft_clipper": {"enabled": True, "drive": 1.8, "ceiling_db": -1.0, "mode": "tanh"},
+        "reverb": {"enabled": True, "wet_mix": 0.15, "predelay_ms": 25.0},
         "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
     "Broadcast": {
+        "noise_gate": {"enabled": True, "threshold_db": -32.0, "attack_ms": 1.5,
+                        "release_ms": 80.0, "hold_ms": 40.0, "reduction_db": -50.0},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.85, "mode": "auto"},
         "gain_rider": {"enabled": True, "target_rms_db": -18.0, "max_gain_db": 9.0,
                         "max_cut_db": 9.0},
         "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
                         "reduction_db": 12.0},
-        "noise_gate": {"enabled": True, "threshold_db": -32.0, "attack_ms": 1.5,
-                        "release_ms": 80.0, "hold_ms": 40.0, "reduction_db": -50.0},
-        "spectral_noise_reduction": {"enabled": True, "strength": 0.85, "mode": "auto"},
+        "nr_cleanup": {"enabled": True, "strength": 0.5, "mode": "stationary",
+                       "n_std_thresh": 2.0},
         "dereverb": {"enabled": True, "strength": 0.6},
         "highpass_filter": {"enabled": True, "cutoff_hz": 120.0},
         "parametric_eq": {"enabled": True, "preset": "bright"},
@@ -214,13 +231,15 @@ PRESET_CONFIGS = {
         "limiter": {"enabled": True, "ceiling_db": -0.5},
     },
     "Warm": {
+        "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
+                        "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
         "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
                         "max_cut_db": 6.0},
         "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
                         "reduction_db": 10.0},
-        "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
-                        "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
-        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
+        "nr_cleanup": {"enabled": True, "strength": 0.3, "mode": "stationary",
+                       "n_std_thresh": 2.5},
         "dereverb": {"enabled": True, "strength": 0.4},
         "highpass_filter": {"enabled": True, "cutoff_hz": 80.0},
         "parametric_eq": {"enabled": True, "preset": "warm"},
@@ -234,13 +253,15 @@ PRESET_CONFIGS = {
         "limiter": {"enabled": True, "ceiling_db": -0.7},
     },
     "Bright": {
+        "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
+                        "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
+        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
         "gain_rider": {"enabled": True, "target_rms_db": -20.0, "max_gain_db": 6.0,
                         "max_cut_db": 6.0},
         "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0, "threshold_db": -25.0,
                         "reduction_db": 10.0},
-        "noise_gate": {"enabled": True, "threshold_db": -35.0, "attack_ms": 2.0,
-                        "release_ms": 100.0, "hold_ms": 50.0, "reduction_db": -40.0},
-        "spectral_noise_reduction": {"enabled": True, "strength": 0.75, "mode": "auto"},
+        "nr_cleanup": {"enabled": True, "strength": 0.3, "mode": "stationary",
+                       "n_std_thresh": 2.5},
         "dereverb": {"enabled": True, "strength": 0.5},
         "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
         "parametric_eq": {"enabled": True, "preset": "bright"},
@@ -595,6 +616,38 @@ def spectral_noise_reduction(data: np.ndarray, sr: int, **params) -> np.ndarray:
         data, sr,
         strength=strength,
         guide_stem=guide_stem,
+        hpf_cutoff_hz=0.0,
+        mode=mode,
+        n_std_thresh=n_std_thresh,
+        use_torch=use_torch,
+        freq_smooth_hz=freq_smooth_hz,
+        time_smooth_ms=time_smooth_ms,
+    )
+
+
+def nr_cleanup(data: np.ndarray, sr: int, **params) -> np.ndarray:
+    """Second-pass noise reduction — gentle cleanup after gain rider.
+
+    Reuses reduce_noise() but with gentler parameters and NO stem-guided
+    profile.  Catches residual noise amplified by the gain rider.  Always
+    uses stationary mode with auto-estimated profile from the signal itself.
+    """
+    strength = params.get("strength", 0.4)
+    mode = params.get("mode", "stationary")
+    n_std_thresh = params.get("n_std_thresh", 2.5)
+    use_torch = params.get("use_torch", None)
+    freq_smooth_hz = params.get("freq_smooth_hz", 500)
+    time_smooth_ms = params.get("time_smooth_ms", 50)
+
+    if strength == 0.0:
+        return data
+
+    from vocalforge.audio.noise_reduction import reduce_noise
+
+    return reduce_noise(
+        data, sr,
+        strength=strength,
+        guide_stem=None,
         hpf_cutoff_hz=0.0,
         mode=mode,
         n_std_thresh=n_std_thresh,
@@ -1250,10 +1303,11 @@ def limiter(data: np.ndarray, sr: int, **params) -> np.ndarray:
 # --- Effect dispatch table ---
 
 _EFFECT_FUNCS = {
-    "gain_rider": gain_rider,
-    "de_plosive": de_plosive,
     "noise_gate": noise_gate,
     "spectral_noise_reduction": spectral_noise_reduction,
+    "gain_rider": gain_rider,
+    "de_plosive": de_plosive,
+    "nr_cleanup": nr_cleanup,
     "dereverb": dereverb,
     "highpass_filter": highpass_filter,
     "parametric_eq": parametric_eq,

@@ -17,6 +17,7 @@ from vocalforge.audio.effects import (
     highpass_filter,
     limiter,
     noise_gate,
+    nr_cleanup,
     parametric_eq,
     process_vocal,
     reverb,
@@ -676,7 +677,7 @@ class TestCompressor:
 class TestPresets:
 
     def test_preset_definitions_valid(self):
-        """All presets must contain all 13 chain keys with an 'enabled' key."""
+        """All presets must contain all 14 chain keys with an 'enabled' key."""
         for name, preset in PRESET_CONFIGS.items():
             for chain_key in CHAIN_ORDER:
                 assert chain_key in preset, \
@@ -781,7 +782,27 @@ class TestProcessVocal:
         assert result.max() <= ceiling_lin + 1e-4
 
     def test_chain_order_count(self):
-        assert len(CHAIN_ORDER) == 13
+        assert len(CHAIN_ORDER) == 14
+
+    def test_chain_order_sequence(self):
+        """Chain order must follow the 14-stage pipeline specification."""
+        expected = [
+            "noise_gate",
+            "spectral_noise_reduction",
+            "gain_rider",
+            "de_plosive",
+            "nr_cleanup",
+            "dereverb",
+            "highpass_filter",
+            "parametric_eq",
+            "compressor_peak",
+            "compressor_body",
+            "de_esser",
+            "soft_clipper",
+            "reverb",
+            "limiter",
+        ]
+        assert CHAIN_ORDER == expected
 
     def test_all_effects_in_dispatch(self):
         from vocalforge.audio.effects import _EFFECT_FUNCS
@@ -789,17 +810,19 @@ class TestProcessVocal:
             assert name in _EFFECT_FUNCS
 
     def test_full_chain_all_enabled(self):
-        """All 13 effects enabled should produce finite output with correct shape."""
+        """All 14 effects enabled should produce finite output with correct shape."""
         data = _make_tone(duration_s=2.0, amplitude=0.5)
         config = {
-            "gain_rider": {"enabled": True, "target_rms_db": -20.0,
-                           "max_gain_db": 6.0, "max_cut_db": 6.0},
-            "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0,
-                           "threshold_db": -25.0, "reduction_db": 10.0},
             "noise_gate": {"enabled": True, "threshold_db": -35.0,
                            "reduction_db": -40.0},
             "spectral_noise_reduction": {"enabled": True, "strength": 0.5,
                                           "mode": "adaptive"},
+            "gain_rider": {"enabled": True, "target_rms_db": -20.0,
+                           "max_gain_db": 6.0, "max_cut_db": 6.0},
+            "de_plosive": {"enabled": True, "plosive_freq_hz": 200.0,
+                           "threshold_db": -25.0, "reduction_db": 10.0},
+            "nr_cleanup": {"enabled": True, "strength": 0.4,
+                           "mode": "stationary", "n_std_thresh": 2.5},
             "dereverb": {"enabled": True, "strength": 0.4},
             "highpass_filter": {"enabled": True, "cutoff_hz": 100.0},
             "parametric_eq": {"enabled": True,
@@ -901,3 +924,76 @@ class TestSpectralNoiseReduction:
         assert "use_torch" in snr_cfg
         assert "freq_smooth_hz" in snr_cfg
         assert "time_smooth_ms" in snr_cfg
+
+
+# --- NR Cleanup (Pass 2) tests ---
+
+
+class TestNrCleanup:
+
+    def test_gentle_reduction(self):
+        """nr_cleanup should reduce noise more gently than pass 1."""
+        rng = np.random.default_rng(42)
+        noise_only = (0.1 * rng.standard_normal(SR // 2)).astype(np.float32)
+        tone_noisy = _make_tone(duration_s=1.5, amplitude=0.5) + \
+            (0.1 * rng.standard_normal(int(SR * 1.5))).astype(np.float32)
+        signal = np.concatenate([noise_only, tone_noisy])
+
+        # Pass 1 (aggressive defaults)
+        pass1 = spectral_noise_reduction(signal, SR, strength=0.75,
+                                          mode="stationary", n_std_thresh=1.5)
+        # Pass 2 / nr_cleanup (gentle defaults)
+        pass2 = nr_cleanup(signal, SR, strength=0.4,
+                           mode="stationary", n_std_thresh=2.5)
+
+        rms_original = np.sqrt(np.mean(signal[:SR // 2].astype(np.float64) ** 2))
+        rms_pass1 = np.sqrt(np.mean(pass1[:SR // 2].astype(np.float64) ** 2))
+        rms_pass2 = np.sqrt(np.mean(pass2[:SR // 2].astype(np.float64) ** 2))
+
+        # Both should reduce noise
+        assert rms_pass1 < rms_original
+        assert rms_pass2 < rms_original
+        # Pass 1 should be more aggressive (lower residual noise)
+        assert rms_pass1 < rms_pass2, \
+            f"Pass 1 should be more aggressive: {rms_pass1:.4f} vs {rms_pass2:.4f}"
+
+    def test_no_guide_stem(self):
+        """nr_cleanup must NOT pass guide_stem to reduce_noise."""
+        from unittest.mock import patch
+        data = _make_tone(duration_s=2.0)
+        with patch("vocalforge.audio.noise_reduction.reduce_noise") as mock_rn:
+            mock_rn.return_value = data
+            nr_cleanup(data, SR, strength=0.4,
+                       guide_stem=np.ones(SR, dtype=np.float32))
+            mock_rn.assert_called_once()
+            call_kwargs = mock_rn.call_args.kwargs
+            assert call_kwargs.get("guide_stem") is None, \
+                "nr_cleanup must not forward guide_stem to reduce_noise"
+
+    def test_strength_zero_passthrough(self):
+        """strength=0 should return input unchanged."""
+        data = _make_tone(duration_s=2.0)
+        result = nr_cleanup(data, SR, strength=0.0)
+        np.testing.assert_array_equal(result, data)
+
+    def test_preserves_shape_mono(self):
+        data = _make_tone(duration_s=2.0)
+        result = nr_cleanup(data, SR, strength=0.4)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_preserves_shape_stereo(self):
+        mono = _make_tone(duration_s=2.0)
+        data = np.column_stack([mono, mono])
+        result = nr_cleanup(data, SR, strength=0.4)
+        assert result.shape == data.shape
+        assert result.dtype == np.float32
+
+    def test_default_config_nr_cleanup(self):
+        """DEFAULT_CONFIG should have nr_cleanup with stationary mode, no guide_stem."""
+        cfg = DEFAULT_CONFIG["nr_cleanup"]
+        assert cfg["enabled"] is True
+        assert cfg["mode"] == "stationary"
+        assert cfg["strength"] == 0.7
+        assert cfg["n_std_thresh"] == 1.5
+        assert "guide_stem" not in cfg

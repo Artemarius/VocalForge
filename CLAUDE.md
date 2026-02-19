@@ -33,7 +33,7 @@ VocalForge/
 │   │   ├── __init__.py
 │   │   ├── engine.py           # Playback + recording streams (sounddevice)
 │   │   ├── alignment.py        # Cross-correlation alignment (constrained)
-│   │   ├── effects.py          # 13-stage vocal processing pipeline
+│   │   ├── effects.py          # 14-stage vocal processing pipeline
 │   │   ├── mixer.py            # LUFS normalization + mixing
 │   │   └── noise_reduction.py  # Spectral gating + high-pass filter
 │   ├── separation/
@@ -102,7 +102,8 @@ Development follows PROJECT.md phases. Each phase is self-contained:
 - **Phase 8a:** Noise gate + de-reverb + preset system + UX improvements [DONE]
 - **Phase 8b:** Parametric EQ + compressor + NR mode selection (v0.3.1) [DONE]
 - **Phase 8c:** De-esser + reverb — completes 9-stage pipeline [DONE]
-- **Phase 8d:** Gain rider, de-plosive, serial compression, soft clipper — 13-stage pipeline [v0.5.0]
+- **Phase 8d:** Gain rider, de-plosive, serial compression, soft clipper — 13-stage pipeline [v0.5.0] [DONE]
+- **Phase 8e:** Two-pass NR, chain reorder — 14-stage pipeline [v0.5.1]
 - **Phase 11:** Settings persistence, drag-and-drop, error handling [v0.6.0]
 - **Phase 12:** Testing, PyInstaller exe, README screenshots [v0.7.0]
 - **Phase 10:** Auto-tune research & prototyping [v0.8.0]

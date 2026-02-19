@@ -264,47 +264,7 @@ class MixPanel(QWidget):
         ecl.addLayout(preset_row)
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
 
-        # 1. Gain Rider
-        gr_target_spin = QSpinBox()
-        gr_target_spin.setRange(-30, -12)
-        gr_target_spin.setValue(-20)
-        gr_target_spin.setSuffix(" dB")
-        gr_target_spin.setToolTip("Target RMS level for gain riding")
-        gr_max_gain_spin = QSpinBox()
-        gr_max_gain_spin.setRange(0, 12)
-        gr_max_gain_spin.setValue(6)
-        gr_max_gain_spin.setSuffix(" dB")
-        gr_max_gain_spin.setToolTip("Maximum boost for quiet sections")
-        self._add_effect_row(ecl, "gain_rider", "Gain Rider",
-                             stub=False,
-                             controls=[gr_target_spin, gr_max_gain_spin])
-        self._effect_controls["gain_rider"] = {
-            "target_spin": gr_target_spin,
-            "max_gain_spin": gr_max_gain_spin,
-        }
-        self._effect_checkboxes["gain_rider"].setChecked(False)
-
-        # 2. De-Plosive
-        dp_thresh_spin = QSpinBox()
-        dp_thresh_spin.setRange(-40, -10)
-        dp_thresh_spin.setValue(-25)
-        dp_thresh_spin.setSuffix(" dB")
-        dp_thresh_spin.setToolTip("Detection threshold for plosive events")
-        dp_reduction_spin = QSpinBox()
-        dp_reduction_spin.setRange(3, 18)
-        dp_reduction_spin.setValue(10)
-        dp_reduction_spin.setSuffix(" dB")
-        dp_reduction_spin.setToolTip("Attenuation applied to plosive energy")
-        self._add_effect_row(ecl, "de_plosive", "De-Plosive",
-                             stub=False,
-                             controls=[dp_thresh_spin, dp_reduction_spin])
-        self._effect_controls["de_plosive"] = {
-            "threshold_spin": dp_thresh_spin,
-            "reduction_spin": dp_reduction_spin,
-        }
-        self._effect_checkboxes["de_plosive"].setChecked(False)
-
-        # 3. Noise Gate
+        # 1. Noise Gate
         gate_thresh_spin = QSpinBox()
         gate_thresh_spin.setRange(-60, -20)
         gate_thresh_spin.setValue(-35)
@@ -322,10 +282,9 @@ class MixPanel(QWidget):
             "threshold_spin": gate_thresh_spin,
             "reduction_spin": gate_reduction_spin,
         }
-        # Default: unchecked (matches DEFAULT_CONFIG enabled=False)
-        self._effect_checkboxes["noise_gate"].setChecked(False)
+        self._effect_checkboxes["noise_gate"].setChecked(True)
 
-        # 2. Noise Reduction (working)
+        # 2. Noise Reduction (Pass 1 — main, stem-guided)
         nr_combo = QComboBox()
         nr_combo.addItems(["Subtle", "Moderate", "Aggressive"])
         nr_combo.setCurrentIndex(1)
@@ -348,21 +307,77 @@ class MixPanel(QWidget):
             "combo": nr_combo, "mode_combo": nr_mode_combo, "adv_btn": nr_adv_btn,
         }
 
-        # 3. De-Reverb (working)
+        # 3. Gain Rider
+        gr_target_spin = QSpinBox()
+        gr_target_spin.setRange(-30, -12)
+        gr_target_spin.setValue(-20)
+        gr_target_spin.setSuffix(" dB")
+        gr_target_spin.setToolTip("Target RMS level for gain riding")
+        gr_max_gain_spin = QSpinBox()
+        gr_max_gain_spin.setRange(0, 12)
+        gr_max_gain_spin.setValue(4)
+        gr_max_gain_spin.setSuffix(" dB")
+        gr_max_gain_spin.setToolTip("Maximum boost for quiet sections")
+        self._add_effect_row(ecl, "gain_rider", "Gain Rider",
+                             stub=False,
+                             controls=[gr_target_spin, gr_max_gain_spin])
+        self._effect_controls["gain_rider"] = {
+            "target_spin": gr_target_spin,
+            "max_gain_spin": gr_max_gain_spin,
+        }
+        self._effect_checkboxes["gain_rider"].setChecked(True)
+
+        # 4. De-Plosive
+        dp_thresh_spin = QSpinBox()
+        dp_thresh_spin.setRange(-40, -10)
+        dp_thresh_spin.setValue(-25)
+        dp_thresh_spin.setSuffix(" dB")
+        dp_thresh_spin.setToolTip("Detection threshold for plosive events")
+        dp_reduction_spin = QSpinBox()
+        dp_reduction_spin.setRange(3, 18)
+        dp_reduction_spin.setValue(10)
+        dp_reduction_spin.setSuffix(" dB")
+        dp_reduction_spin.setToolTip("Attenuation applied to plosive energy")
+        self._add_effect_row(ecl, "de_plosive", "De-Plosive",
+                             stub=False,
+                             controls=[dp_thresh_spin, dp_reduction_spin])
+        self._effect_controls["de_plosive"] = {
+            "threshold_spin": dp_thresh_spin,
+            "reduction_spin": dp_reduction_spin,
+        }
+        self._effect_checkboxes["de_plosive"].setChecked(True)
+
+        # 5. NR Cleanup (Pass 2 — gentle residual noise cleanup after gain rider)
+        nr2_combo = QComboBox()
+        nr2_combo.addItems(["Light", "Medium", "Strong"])
+        nr2_combo.setCurrentIndex(2)
+        nr2_combo.setToolTip(
+            "Residual noise cleanup after gain rider\n"
+            "Light: barely touches signal, catches obvious residual noise\n"
+            "Medium: good balance\n"
+            "Strong: more aggressive, risk of artifacts"
+        )
+        self._add_effect_row(ecl, "nr_cleanup", "NR Cleanup",
+                             stub=False,
+                             controls=[nr2_combo])
+        self._effect_controls["nr_cleanup"] = {"combo": nr2_combo}
+        self._effect_checkboxes["nr_cleanup"].setChecked(True)
+
+        # 6. De-Reverb
         dereverb_combo = QComboBox()
         dereverb_combo.addItems(["Light", "Medium", "Strong"])
-        dereverb_combo.setCurrentIndex(0)
+        dereverb_combo.setCurrentIndex(1)
         self._add_effect_row(ecl, "dereverb", "De-Reverb",
                              stub=False,
                              controls=[dereverb_combo])
         self._effect_controls["dereverb"] = {"combo": dereverb_combo}
         # Default: unchecked (matches DEFAULT_CONFIG enabled=False)
-        self._effect_checkboxes["dereverb"].setChecked(False)
+        self._effect_checkboxes["dereverb"].setChecked(True)
 
         # 4. High-Pass Filter (working)
         hpf_spin = QSpinBox()
         hpf_spin.setRange(0, 200)
-        hpf_spin.setValue(100)
+        hpf_spin.setValue(120)
         hpf_spin.setSuffix(" Hz")
         hpf_spin.setToolTip("High-pass filter cutoff (0 = disabled)")
         self._add_effect_row(ecl, "highpass_filter",
@@ -373,12 +388,12 @@ class MixPanel(QWidget):
         # 5. Parametric EQ (working)
         eq_combo = QComboBox()
         eq_combo.addItems(["Clean Up", "Warm", "Bright"])
-        eq_combo.setCurrentIndex(2)
+        eq_combo.setCurrentIndex(0)
         eq_combo.setToolTip("EQ preset: shape the vocal tone")
         self._add_effect_row(ecl, "parametric_eq", "Parametric EQ",
                              stub=False, controls=[eq_combo])
         self._effect_controls["parametric_eq"] = {"combo": eq_combo}
-        self._effect_checkboxes["parametric_eq"].setChecked(False)
+        self._effect_checkboxes["parametric_eq"].setChecked(True)
 
         # 8. Compressor Peak (fast attack, catches transient spikes)
         cpeak_thresh_spin = QSpinBox()
@@ -399,7 +414,7 @@ class MixPanel(QWidget):
             "threshold_spin": cpeak_thresh_spin,
             "ratio_spin": cpeak_ratio_spin,
         }
-        self._effect_checkboxes["compressor_peak"].setChecked(False)
+        self._effect_checkboxes["compressor_peak"].setChecked(True)
 
         # 9. Compressor Body (slow attack, smooths overall dynamics)
         cbody_thresh_spin = QSpinBox()
@@ -420,17 +435,17 @@ class MixPanel(QWidget):
             "threshold_spin": cbody_thresh_spin,
             "ratio_spin": cbody_ratio_spin,
         }
-        self._effect_checkboxes["compressor_body"].setChecked(False)
+        self._effect_checkboxes["compressor_body"].setChecked(True)
 
         # 7. De-Esser (working)
         deesser_freq_spin = QSpinBox()
         deesser_freq_spin.setRange(3000, 10000)
-        deesser_freq_spin.setValue(6000)
+        deesser_freq_spin.setValue(5000)
         deesser_freq_spin.setSuffix(" Hz")
         deesser_freq_spin.setToolTip("Center frequency for sibilance detection")
         deesser_reduction_spin = QSpinBox()
         deesser_reduction_spin.setRange(0, 12)
-        deesser_reduction_spin.setValue(6)
+        deesser_reduction_spin.setValue(12)
         deesser_reduction_spin.setSuffix(" dB")
         deesser_reduction_spin.setToolTip("Maximum sibilance reduction")
         self._add_effect_row(ecl, "de_esser", "De-Esser",
@@ -440,12 +455,12 @@ class MixPanel(QWidget):
             "freq_spin": deesser_freq_spin,
             "reduction_spin": deesser_reduction_spin,
         }
-        self._effect_checkboxes["de_esser"].setChecked(False)
+        self._effect_checkboxes["de_esser"].setChecked(True)
 
         # 11. Soft Clipper
         sc_drive_spin = QDoubleSpinBox()
         sc_drive_spin.setRange(1.0, 4.0)
-        sc_drive_spin.setValue(1.5)
+        sc_drive_spin.setValue(1.8)
         sc_drive_spin.setSingleStep(0.1)
         sc_drive_spin.setToolTip("Saturation drive (1.0 = no effect)")
         sc_mode_combo = QComboBox()
@@ -459,7 +474,7 @@ class MixPanel(QWidget):
             "drive_spin": sc_drive_spin,
             "mode_combo": sc_mode_combo,
         }
-        self._effect_checkboxes["soft_clipper"].setChecked(False)
+        self._effect_checkboxes["soft_clipper"].setChecked(True)
 
         # 12. Reverb
         self._reverb_ir_path: str | None = None
@@ -486,7 +501,7 @@ class MixPanel(QWidget):
             "predelay_spin": reverb_predelay_spin,
             "ir_btn": reverb_ir_btn,
         }
-        self._effect_checkboxes["reverb"].setChecked(False)
+        self._effect_checkboxes["reverb"].setChecked(True)
 
         # 9. Limiter (working)
         limiter_spin = QDoubleSpinBox()
@@ -664,6 +679,11 @@ class MixPanel(QWidget):
                 if "reduction_spin" in ctrls and "reduction_db" in cfg:
                     ctrls["reduction_spin"].setValue(int(cfg["reduction_db"]))
 
+            elif key == "nr_cleanup":
+                if "combo" in ctrls and "strength" in cfg:
+                    _nrc_idx = {0.3: 0, 0.5: 1, 0.7: 2}
+                    ctrls["combo"].setCurrentIndex(_nrc_idx.get(cfg["strength"], 0))
+
             elif key == "noise_gate":
                 if "threshold_spin" in ctrls and "threshold_db" in cfg:
                     ctrls["threshold_spin"].setValue(int(cfg["threshold_db"]))
@@ -809,6 +829,22 @@ class MixPanel(QWidget):
             "enabled": dp_cb.isChecked(),
             "threshold_db": float(dp_ctrls["threshold_spin"].value()),
             "reduction_db": float(dp_ctrls["reduction_spin"].value()),
+        }
+
+        # NR Cleanup (Pass 2)
+        nr2_cb = self._effect_checkboxes["nr_cleanup"]
+        nr2_combo = self._effect_controls["nr_cleanup"]["combo"]
+        _nr2_params = {
+            0: {"strength": 0.3, "n_std_thresh": 2.5},   # Light
+            1: {"strength": 0.5, "n_std_thresh": 2.0},   # Medium
+            2: {"strength": 0.7, "n_std_thresh": 1.5},   # Strong
+        }
+        nr2_p = _nr2_params[nr2_combo.currentIndex()]
+        config["nr_cleanup"] = {
+            "enabled": nr2_cb.isChecked(),
+            "strength": nr2_p["strength"],
+            "n_std_thresh": nr2_p["n_std_thresh"],
+            "mode": "stationary",
         }
 
         # Noise Gate
